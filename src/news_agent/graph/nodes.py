@@ -1,0 +1,394 @@
+"""Graph nodes: fetch -> filter -> analyze -> summarize -> format (TODO item 9).
+
+Each node is defensive on purpose: a node never raises for an expected failure
+(source down, LLM refusing, empty result).  Problems are recorded on the
+:class:`~news_agent.runtime.RunContext` and the run keeps going with whatever
+data is available, which is what the degradation contract promises to callers.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from langchain_core.runnables import RunnableConfig
+
+from ..analyzer import Analyzer, HeuristicAnalyzer, light_analyze
+from ..cache import SqliteCache
+from ..config import Settings
+from ..dedup import Deduplicator
+from ..models import (
+    ErrorCode,
+    NewsResult,
+    RawArticle,
+    SkillMode,
+    SkillRequest,
+    utcnow,
+)
+from ..relevance import relevance_score, select_relevant
+from ..runtime import Metrics, RunContext, get_logger
+from ..sources import SourceRegistry
+from ..trends import build_trends
+from .state import NewsState
+
+log = get_logger("graph")
+
+
+@dataclass
+class GraphDeps:
+    """Everything the nodes need, injected once."""
+
+    settings: Settings
+    registry: SourceRegistry
+    analyzer: Analyzer
+    heuristic: HeuristicAnalyzer
+    cache: SqliteCache | None
+    metrics: Metrics
+    deduplicator: Deduplicator
+
+
+def get_ctx(config: RunnableConfig | None) -> RunContext:
+    """Retrieve (or lazily create) the run context from the LangGraph config."""
+    configurable = (config or {}).get("configurable") or {}
+    ctx = configurable.get("ctx")
+    if ctx is None:
+        ctx = RunContext()
+        configurable["ctx"] = ctx
+    return ctx
+
+
+def require_request(state: NewsState) -> SkillRequest:
+    """Read the (mandatory) ``request`` entry of the graph state.
+
+    ``NewsState`` is ``total=False`` because every node returns a partial update,
+    so the request is looked up through ``.get`` and validated explicitly.
+    """
+    request = state.get("request")
+    if request is None:  # pragma: no cover - the graph is always seeded with it
+        raise RuntimeError("NewsState is missing the required 'request' entry")
+    return request
+
+
+class NewsGraphNodes:
+    """Callables registered as LangGraph nodes."""
+
+    def __init__(self, deps: GraphDeps) -> None:
+        self.deps = deps
+        self.settings = deps.settings
+
+    # ------------------------------------------------------------------
+    # fetch
+    # ------------------------------------------------------------------
+    async def fetch_node(self, state: NewsState, config: RunnableConfig) -> dict[str, Any]:
+        ctx = get_ctx(config)
+        request = require_request(state)
+        articles: list[RawArticle] = []
+        cached = False
+
+        with ctx.timeit("fetch"):
+            cache_key = request.cache_key()
+            if self.deps.cache is not None:
+                cached_articles = await self.deps.cache.get_articles(cache_key)
+                if cached_articles:
+                    articles = cached_articles
+                    cached = True
+                    ctx.count("fetch_cache_hit")
+                    ctx.emit(
+                        "fetch",
+                        f"命中抓取缓存，复用 {len(articles)} 篇（未访问新闻源）",
+                        cached=True,
+                    )
+
+            if not cached:
+                sources = self.deps.registry.select(request.sources)
+                if not sources:
+                    ctx.add_error(
+                        ErrorCode.SOURCE_UNAVAILABLE,
+                        "没有可用的新闻源，请检查 NEWS_AGENT_* 配置",
+                        stage="fetch",
+                    )
+                per_source = self._per_source_limit(request, len(sources))
+                ctx.emit(
+                    "fetch",
+                    f"并发抓取 {len(sources)} 个新闻源（每源上限 {per_source} 篇）",
+                )
+
+                def _progress(name: str, count: int) -> None:
+                    ctx.emit(
+                        "fetch",
+                        f"新闻源 {name} 返回 {count} 篇",
+                        event="progress",
+                        source=name,
+                        count=count,
+                    )
+
+                articles, errors = await self.deps.registry.fetch_all(
+                    request,
+                    per_source_limit=per_source,
+                    progress=_progress,
+                )
+                for error in errors:
+                    ctx.add_error(
+                        error.code,
+                        error.message,
+                        source=error.source,
+                        stage=error.stage or "fetch",
+                        retryable=error.retryable,
+                    )
+                ctx.count("articles_fetched", len(articles))
+
+                if self.deps.cache is not None:
+                    await self.deps.cache.set_articles(cache_key, articles)
+                    new_ids = await self.deps.cache.upsert_history(articles)
+                    if new_ids:
+                        ctx.count("articles_new_since_last_run", len(new_ids))
+                        ctx.emit(
+                            "fetch",
+                            f"其中 {len(new_ids)} 篇为增量新文章",
+                            event="progress",
+                            new_articles=len(new_ids),
+                        )
+
+        if not articles:
+            ctx.add_error(
+                ErrorCode.NO_RESULTS,
+                f"所有新闻源均未返回与「{request.query}」相关的结果",
+                stage="fetch",
+                retryable=True,
+            )
+            ctx.add_warning("本次运行没有抓到任何新闻，返回空结果集")
+        else:
+            ctx.emit("fetch", f"抓取完成，共获得 {len(articles)} 篇原始文章")
+
+        return {"raw_articles": articles}
+
+    def _per_source_limit(self, request: SkillRequest, source_count: int) -> int:
+        if source_count <= 0:
+            return request.limit
+        # over-fetch a little: relevance filtering and de-duplication will trim
+        per_source = request.limit * self.settings.fetch_per_source_multiplier / source_count
+        return int(max(5, per_source + 3))
+
+    # ------------------------------------------------------------------
+    # filter
+    # ------------------------------------------------------------------
+    async def filter_node(self, state: NewsState, config: RunnableConfig) -> dict[str, Any]:
+        ctx = get_ctx(config)
+        request = require_request(state)
+        raw = list(state.get("raw_articles") or [])
+
+        with ctx.timeit("filter"):
+            deduped = self.deps.deduplicator.dedupe(raw)
+            duplicates = len(raw) - len(deduped)
+            ctx.count("articles_deduped", duplicates)
+            ctx.emit(
+                "filter",
+                f"去重完成：{len(raw)} → {len(deduped)} 篇（移除 {duplicates} 篇重复报道）",
+                duplicates_removed=duplicates,
+            )
+
+            threshold = (
+                request.threshold
+                if request.threshold is not None
+                else self.settings.relevance_threshold
+            )
+            selected, dropped, topped_up = select_relevant(
+                deduped, request, threshold=threshold, limit=request.limit
+            )
+            if topped_up:
+                ctx.add_warning(
+                    f"{topped_up} 篇结果相关度低于阈值 {threshold}，为满足数量要求被保留"
+                )
+            if deduped and not selected:
+                ctx.add_warning("候选文章均未通过相关度过滤")
+            ctx.count("articles_selected", len(selected))
+            ctx.emit(
+                "filter",
+                f"相关性过滤完成：保留 {len(selected)} 篇，丢弃 {dropped} 篇",
+                dropped=dropped,
+                threshold=threshold,
+            )
+
+        return {
+            "deduped_articles": deduped,
+            "filtered_articles": selected,
+            "duplicates_removed": duplicates,
+        }
+
+    def route_after_filter(self, state: NewsState) -> str:
+        """``fetch_news`` stops here; the other skills continue to analysis."""
+        request = require_request(state)
+        if request.skill is SkillMode.FETCH:
+            return "format"
+        if not state.get("filtered_articles"):
+            return "format"
+        return "analyze"
+
+    # ------------------------------------------------------------------
+    # analyze
+    # ------------------------------------------------------------------
+    async def analyze_node(self, state: NewsState, config: RunnableConfig) -> dict[str, Any]:
+        ctx = get_ctx(config)
+        request = require_request(state)
+        articles = list(state.get("filtered_articles") or [])
+
+        if not articles:
+            return {"analyzed_articles": []}
+
+        with ctx.timeit("analyze"):
+            if request.skill is SkillMode.FETCH or not request.include_analyzed:
+                analyzed = light_analyze(articles)
+                ctx.emit("analyze", f"fetch_news：跳过 LLM，仅返回 {len(analyzed)} 篇结构化元数据")
+            else:
+                budget = max(1, self.settings.max_articles_for_llm)
+                head, tail = articles[:budget], articles[budget:]
+                ctx.emit("analyze", f"开始结构化分析 {len(head)} 篇文章（LLM≈{self.deps.analyzer.name}）")
+                analyzed = await self.deps.analyzer.analyze(request, head, ctx)
+                if tail:
+                    ctx.add_warning(
+                        f"超过 LLM 预算（{budget} 篇）的 {len(tail)} 篇文章使用启发式分析"
+                    )
+                    analyzed = analyzed + await self.deps.heuristic.analyze(request, tail, ctx)
+
+            # attach the relevance score computed by the filter stage
+            scores = {
+                article.id: relevance_score(article, request.query) for article in articles
+            }
+            for item in analyzed:
+                item.relevance = scores.get(item.id, 0.0)
+            analyzed.sort(
+                key=lambda item: (
+                    item.relevance,
+                    item.published_at.timestamp() if item.published_at else 0.0,
+                ),
+                reverse=True,
+            )
+            ctx.count("articles_analyzed", len(analyzed))
+            positive = sum(1 for item in analyzed if item.sentiment == "positive")
+            negative = sum(1 for item in analyzed if item.sentiment == "negative")
+            ctx.emit(
+                "analyze",
+                f"分析完成：正面 {positive} 篇 / 负面 {negative} 篇 / 其他 {len(analyzed) - positive - negative} 篇",
+                positive=positive,
+                negative=negative,
+            )
+
+        return {"analyzed_articles": analyzed}
+
+    # ------------------------------------------------------------------
+    # summarize
+    # ------------------------------------------------------------------
+    async def summarize_node(self, state: NewsState, config: RunnableConfig) -> dict[str, Any]:
+        ctx = get_ctx(config)
+        request = require_request(state)
+        analyzed = list(state.get("analyzed_articles") or [])
+
+        if request.skill is SkillMode.FETCH or not analyzed:
+            return {"summary": ""}
+
+        with ctx.timeit("summarize"):
+            ctx.emit("summarize", f"生成话题级摘要（map-reduce，{len(analyzed)} 篇）")
+            summary = await self.deps.analyzer.summarize(request, analyzed, ctx)
+            ctx.emit("summarize", "摘要生成完成", length=len(summary))
+        return {"summary": summary}
+
+    # ------------------------------------------------------------------
+    # format
+    # ------------------------------------------------------------------
+    async def format_node(self, state: NewsState, config: RunnableConfig) -> dict[str, Any]:
+        ctx = get_ctx(config)
+        request = require_request(state)
+        started = ctx.started_at
+
+        raw = list(state.get("raw_articles") or [])
+        deduped = list(state.get("deduped_articles") or [])
+        filtered = list(state.get("filtered_articles") or [])
+        analyzed = list(state.get("analyzed_articles") or [])
+        summary = state.get("summary") or ""
+
+        with ctx.timeit("format"):
+            if request.skill is SkillMode.FETCH and not analyzed and filtered:
+                # fetch_news skips the analyze node; still return metadata rows
+                analyzed = light_analyze(filtered)
+                scores = {
+                    article.id: relevance_score(article, request.query) for article in filtered
+                }
+                for item in analyzed:
+                    item.relevance = scores.get(item.id, 0.0)
+
+            trends = []
+            if request.skill is SkillMode.TREND and analyzed:
+                trends = build_trends(analyzed, top_n=self.settings.trends_top_n)
+
+            if not summary and request.skill is not SkillMode.FETCH and analyzed:
+                # last-resort degradation: a deterministic summary instead of nothing
+                summary = await self.deps.heuristic.summarize(request, analyzed, ctx)
+                ctx.add_warning("未获得 LLM 摘要，已退化为启发式摘要")
+
+            degraded = any(
+                error.code
+                in {
+                    ErrorCode.NO_RESULTS,
+                    ErrorCode.SOURCE_UNAVAILABLE,
+                    ErrorCode.FETCH_TIMEOUT,
+                    ErrorCode.RATE_LIMITED,
+                    ErrorCode.LLM_FAILED,
+                    ErrorCode.LLM_TIMEOUT,
+                    ErrorCode.CACHE_ERROR,
+                    ErrorCode.CONTEXT_TOO_LONG,
+                    ErrorCode.TASK_TIMEOUT,
+                }
+                for error in ctx.errors
+            )
+
+            counts = {
+                "fetched": len(raw),
+                "duplicates_removed": int(state.get("duplicates_removed") or 0),
+                "after_dedup": len(deduped),
+                "selected": len(filtered),
+                "analyzed": len(analyzed),
+                "sources_used": len({item.source for item in analyzed}),
+                "errors": len(ctx.errors),
+                "warnings": len(ctx.warnings),
+            }
+            metrics = {
+                "analyzer": self.deps.analyzer.name,
+                "llm_enabled": bool(getattr(self.deps.analyzer, "uses_llm", False)),
+                **{key: value for key, value in ctx.counters.items()},
+            }
+
+            result = NewsResult(
+                query=request.query,
+                mode=request.skill,
+                language=request.language,
+                generated_at=utcnow(),
+                duration_ms=int((utcnow() - started).total_seconds() * 1000),
+                degraded=degraded,
+                counts=counts,
+                summary=summary,
+                articles=analyzed,
+                trends=trends,
+                warnings=list(ctx.warnings),
+                errors=list(ctx.errors),
+                timings_ms={},
+                metrics=metrics,
+            )
+
+        # the "format" stage timing is only known once the `with` block exits
+        result.timings_ms = dict(ctx.timings)
+        result.duration_ms = int((utcnow() - started).total_seconds() * 1000)
+        ctx.set_partial(result)
+        ctx.emit(
+            "format",
+            f"任务完成：{result.counts.get('analyzed', 0)} 篇 / 耗时 {result.duration_ms} ms"
+            + ("（降级）" if result.degraded else ""),
+            event="completed",
+        )
+
+        return {
+            "result": result,
+            "warnings": list(ctx.warnings),
+            "errors": [error.code.value for error in ctx.errors],
+            "timings": dict(ctx.timings),
+            "counters": dict(ctx.counters),
+        }

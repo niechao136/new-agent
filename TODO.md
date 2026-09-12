@@ -44,3 +44,40 @@
 20. 按照你平台的"自定义 agent 通过 admin center 发布并绑定 A2A"的架构，把新闻 agent 注册为一个可发布的自定义 agent，走统一路由配置。
 21. 决定这个 agent 是否需要被 A2A 发现（对应你之前记录的开放问题"custom agents 是否也应该是 A2A 可发现的 server"），如果是，确保 Agent Card 格式与你网关约定一致。
 22. 编写调用示例：从默认 agent 或另一个自定义 agent 通过 A2A 工具调用这个新闻 agent，验证端到端链路。
+
+---
+
+## 实现对照表
+
+| # | 完成情况 | 落地位置 |
+| --- | --- | --- |
+| 1 | ✅ Agent Card 定义 3 个 skill + 输入/输出 JSON Schema | `src/news_agent/a2a/card.py`、`models.py`（`SkillRequest` / `NewsResult`） |
+| 2 | ✅ 异步 task 模式 `submitted → working → completed/failed/canceled` | `a2a/executor.py`、`a2a/store.py`、`a2a/models.py` |
+| 3 | ✅ 错误与降级契约（稳定错误码 + 永不抛栈） | `models.py::ErrorCode`、README §5.5 |
+| 4 | ✅ 新闻源：RSS（Google/Bing，免 key）+ NewsAPI + GNews + mock | `sources/rss.py`、`sources/api.py`、`sources/mock.py` |
+| 5 | ✅ `NewsSource.fetch(query, since, limit)` 统一抽象 + 注册表 | `sources/base.py`、`sources/registry.py` |
+| 6 | ✅ 去重：URL 规范化 / 标题规范化 / SimHash + 标题相似度 | `dedup.py` |
+| 7 | ✅ 限流重试（tenacity）、超时（每源 + 整体）、User-Agent 轮换 | `sources/base.py`、`sources/http.py` |
+| 8 | ✅ SQLite 缓存（query+时间窗，TTL）+ 文章历史（增量新文章） | `cache.py` |
+| 9 | ✅ LangGraph 子图：fetch / filter / analyze / summarize / format | `graph/nodes.py`、`graph/builder.py` |
+| 10 | ✅ State 定义 | `graph/state.py`（业务数据入 State，进度/耗时可观测数据放 `RunContext`） |
+| 11 | ✅ map-reduce 摘要（分批小结 → 合并综述，reduce 失败退化为拼接） | `analyzer.py::LLMAnalyzer.summarize` |
+| 12 | ✅ 分析批处理 + `asyncio.gather` + 并发信号量（LLM 预算可配） | `analyzer.py::LLMAnalyzer.analyze`、`sources/http.py::gather_limited` |
+| 13 | ✅ FastAPI A2A server：Agent Card + 任务接口，**协议层全部由 `a2a-sdk` 提供**（`A2AFastAPI` 路由 / `DefaultRequestHandler` / JSON-RPC 1.0 + 0.3 兼容 / HTTP+JSON） | `a2a/server.py`、`a2a/card.py` |
+| 14 | ✅ 子图包装为 SDK 的 `AgentExecutor`（`RequestContext` ⇄ `SkillRequest` ⇄ LangGraph） | `a2a/executor.py`、`graph/agent.py` |
+| 15 | ✅ 任务状态管理使用 SDK 的 `InMemoryTaskStore` + `DefaultRequestHandler`，轮询/订阅/取消/列表均为标准能力 | `a2a/server.py`（换 `DatabaseTaskStore` 即可持久化） |
+| 16 | ✅ SSE 阶段进度推送：SDK 事件队列 + 标准 `TaskStatusUpdateEvent`（`metadata={stage,kind,data}`） | `a2a/executor.py::_publish_progress` |
+| 17 | ✅ 日志埋点：节点耗时、抓取成功率、LLM token 数、`/metrics` | `runtime.py`、`graph/nodes.py` |
+| 18 | ✅ 超时兜底：返回已完成阶段的部分结果（`RunContext.partial`） | `a2a/executor.py::_timeout_result` |
+| 19 | ✅ 68 个单元/集成测试（mock 源响应、filter/summarize 节点、A2A 协议与 SDK 客户端端到端） | `tests/` |
+| 20 | ◑ 平台侧注册/绑定 A2A 需在 admin center 操作（代码侧契约与文档已就绪） | README §9-20 |
+| 21 | ✅ Agent Card 由 SDK 生成（`supportedInterfaces` / `capabilities` / `skills`），同时暴露 1.0 与 0.3 well-known 路径，兼容 PascalCase 与 `message/send` 两套方法名 | `a2a/card.py`、README §9-21 |
+| 22 | ✅ 端到端调用示例（发现 Card → 提交 → 轮询 → SSE → 读 artifact） | `examples/call_news_agent.py`、`a2a/client.py`、`news-agent call` |
+
+验证方式：
+
+```bash
+python -m pytest -q                                  # 64 passed，全程离线
+python -m news_agent.cli run "人形机器人" --mock --no-llm --limit 6
+python -m news_agent.cli serve --port 8080           # 另开终端跑 examples/call_news_agent.py
+```

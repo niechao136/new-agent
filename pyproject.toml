@@ -1,7 +1,71 @@
 [project]
 name = "new-agent"
 version = "0.1.0"
-description = "Add your description here"
+description = "A2A-exposed news agent built with LangGraph + FastAPI"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "pydantic>=2.7",
+    "httpx>=0.27",
+    "tenacity>=8.3",
+    "feedparser>=6.0.11",
+    "langgraph>=0.2.60",
+    "langchain-core>=0.3",
+    "langchain-openai>=0.3",
+    # official A2A SDK (agent card, task lifecycle, JSON-RPC/REST transports,
+    # SSE streaming, client) -- no hand-rolled protocol layer
+    "a2a-sdk[http-server]>=1.1.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "respx>=0.21",
+    "basedpyright>=1.40.1",
+]
+
+[project.scripts]
+news-agent = "news_agent.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/news_agent"]
+
+# ---------------------------------------------------------------------------
+# Type checking -- run with: uv run basedpyright
+#
+# `standard` mode keeps every rule that catches real defects (argument /
+# return / assignment types, Optional access, unbound variables, unused
+# imports & variables, deprecated APIs, ...) at 0 errors.
+#
+# The rules turned off below are "typing completeness" rules that fire on
+# deliberate dynamic interop and would otherwise need hundreds of meaningless
+# `Any` annotations:
+#   * LangGraph's compiled graph and LangChain runnables are dynamically typed
+#   * protobuf `Struct` payloads carry arbitrary JSON by design
+#   * third-party libraries ship partial or missing stubs
+# ---------------------------------------------------------------------------
+[tool.basedpyright]
+typeCheckingMode = "standard"
+pythonVersion = "3.11"
+include = ["src", "tests", "examples"]
+exclude = ["**/__pycache__", "**/.venv/**", ".cache", "**/node_modules/**"]
+reportMissingTypeStubs = false
+reportUnknownMemberType = false
+reportUnknownArgumentType = false
+reportUnknownVariableType = false
+reportUnknownParameterType = false
+reportUnknownLambdaType = false
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["ignore::DeprecationWarning"]
