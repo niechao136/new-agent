@@ -33,14 +33,36 @@ BING_NEWS_RSS = "https://www.bing.com/news/search?q={query}&format=RSS&setlang={
 
 #: 零配置主题 RSS 源（无需 API key）。它们不是关键词搜索，而是固定栏目流：
 #: 抓回后由相关性过滤按查询取舍，作为 Google/Bing 搜索之外的补充。
+#: 覆盖国内科技、国外综合媒体以及财经/体育/娱乐/健康等多个行业。
 TOPIC_RSS_FEEDS: dict[str, str] = {
+    # --- 国内科技 ---
     "36kr": "https://36kr.com/feed",
     "huxiu": "https://www.huxiu.com/rss/0.xml",
     "sspai": "https://sspai.com/feed",
     "solidot": "https://www.solidot.org/index.rss",
+    # --- 国外科技 ---
     "techcrunch": "https://techcrunch.com/feed/",
     "the-verge": "https://www.theverge.com/rss/index.xml",
     "bbc-tech": "https://feeds.bbci.co.uk/news/technology/rss.xml",
+    # --- 国外综合媒体 ---
+    "bbc-world": "https://feeds.bbci.co.uk/news/world/rss.xml",
+    "aljazeera": "https://www.aljazeera.com/xml/rss/all.xml",
+    "npr": "https://feeds.npr.org/1001/rss.xml",
+    "dw": "https://rss.dw.com/rdf/rss-en-all",
+    "france24": "https://www.france24.com/en/rss",
+    "cna": "https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml",
+    "nikkei-asia": "https://asia.nikkei.com/rss/feed/nanex",
+    # --- 财经/商业 ---
+    "cnbc-economy": (
+        "https://search.cnbc.com/rs/search/combinedcms/view.xml"
+        "?partnerId=wrss25&id=20910258"
+    ),
+    "marketwatch": "https://feeds.content.dowjones.io/public/rss/mw_topstories",
+    "economist-finance": "https://www.economist.com/finance-and-economics/rss.xml",
+    # --- 其他行业 ---
+    "espn-sports": "https://www.espn.com/espn/rss/news",
+    "variety-entertainment": "https://variety.com/feed/",
+    "stat-health": "https://www.statnews.com/feed/",
 }
 
 

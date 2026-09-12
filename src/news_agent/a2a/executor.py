@@ -24,6 +24,7 @@ import json
 import re
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import Any
 
 from a2a.helpers.proto_helpers import (
@@ -40,6 +41,7 @@ from a2a.utils.proto_utils import make_dict_serializable
 
 from ..config import Settings
 from ..graph.agent import NewsAgent
+from ..intent import parse_query_intent
 from ..models import ErrorCode, NewsResult, SkillMode, SkillRequest, utcnow
 from ..runtime import Metrics, ProgressEvent, RunContext, get_logger
 from ..text_utils import truncate
@@ -86,20 +88,12 @@ def _metadata(payload: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def parse_skill_request(
-    *,
-    data: dict[str, Any] | None = None,
-    text: str = "",
-    metadata: dict[str, Any] | None = None,
-    context_id: str | None = None,
-    settings: Settings,
-) -> SkillRequest:
-    """Normalise an A2A message payload into a validated :class:`SkillRequest`.
-
-    Accepts the parameters either as a JSON object (``DataPart.data``), as plain
-    text (``"<skill>: <query>"`` or just ``"<query>"``) or in the request
-    ``metadata`` — whichever the calling agent finds convenient.
-    """
+def _extract_payload(
+    data: dict[str, Any] | None,
+    text: str,
+    metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Merge the various request carriers into one payload dict with a ``query``."""
     payload: dict[str, Any] = dict(data or {})
     metadata = dict(metadata or {})
 
@@ -125,6 +119,66 @@ def parse_skill_request(
             payload["query"] = match.group(2).strip()
         else:
             payload["query"] = stripped
+
+    return payload
+
+
+async def aparse_skill_request(
+    *,
+    data: dict[str, Any] | None = None,
+    text: str = "",
+    metadata: dict[str, Any] | None = None,
+    context_id: str | None = None,
+    settings: Settings,
+) -> SkillRequest:
+    """Async counterpart of :func:`parse_skill_request`.
+
+    与同步版本唯一的差别：查询的主题/时间要素优先交给 LLM 解析
+    （:func:`news_agent.intent.parse_query_intent`，LLM 不可用时自动回退
+    正则解析）。调用方显式传入 ``since`` 时跳过解析。
+    """
+    payload = _extract_payload(data, text, metadata)
+    metadata = dict(metadata or {})
+
+    time_window: tuple[datetime | None, datetime | None, str] | None = None
+    if payload.get("since") is None:
+        query = payload.get("query") or metadata.get("query") or ""
+        if isinstance(query, (list, tuple)):
+            query = " ".join(str(item) for item in query)
+        query = str(query).strip()[:300]
+        if query:
+            time_window = await parse_query_intent(query, settings.llm)
+
+    return parse_skill_request(
+        data=payload,
+        metadata=metadata,
+        context_id=context_id,
+        settings=settings,
+        time_window=time_window,
+    )
+
+
+def parse_skill_request(
+    *,
+    data: dict[str, Any] | None = None,
+    text: str = "",
+    metadata: dict[str, Any] | None = None,
+    context_id: str | None = None,
+    settings: Settings,
+    time_window: tuple[datetime | None, datetime | None, str] | None = None,
+) -> SkillRequest:
+    """Normalise an A2A message payload into a validated :class:`SkillRequest`.
+
+    Accepts the parameters either as a JSON object (``DataPart.data``), as plain
+    text (``"<skill>: <query>"`` or just ``"<query>"``) or in the request
+    ``metadata`` — whichever the calling agent finds convenient.
+
+    ``time_window`` allows the caller (usually :func:`aparse_skill_request`)
+    to inject a pre-parsed ``(since, until, cleaned_query)`` result, e.g. one
+    produced by the LLM intent parser.
+    """
+    payload = _extract_payload(data, text, metadata)
+    metadata = dict(metadata or {})
 
     raw_skill = (
         payload.get("skill")
@@ -174,13 +228,17 @@ def parse_skill_request(
     else:
         sources = None
 
-    # 时间窗口：调用方显式传入 since 优先；否则从查询中解析
-    # 「本周/昨天/最近N天」等表达；都没有时走默认窗口（default_window_days）。
+    # 时间窗口：调用方显式传入 since 优先；否则使用预解析结果（LLM 意图解析）
+    # 或从查询中正则解析「本周/昨天/最近N天」等表达；
+    # 都没有时走默认窗口（default_window_days）。
     since = payload.get("since")
     until = payload.get("until")
     search_query = query
     if since is None:
-        parsed_since, parsed_until, cleaned = parse_time_window(query)
+        if time_window is not None:
+            parsed_since, parsed_until, cleaned = time_window
+        else:
+            parsed_since, parsed_until, cleaned = parse_time_window(query)
         search_query = cleaned or query
         if parsed_since is not None:
             since = parsed_since
@@ -236,7 +294,7 @@ class NewsAgentExecutor(AgentExecutor):
         )
 
         try:
-            request = self._build_request(context)
+            request = await self._build_request(context)
         except SkillRequestError as exc:
             log.info("task %s rejected: %s", task_id, exc)
             self.metrics.incr("a2a_tasks_rejected")
@@ -332,7 +390,7 @@ class NewsAgentExecutor(AgentExecutor):
             task.history.append(message)
         return task
 
-    def _build_request(self, context: RequestContext) -> SkillRequest:
+    async def _build_request(self, context: RequestContext) -> SkillRequest:
         message = context.message
         text = get_message_text(message) if message is not None else ""
         data: dict[str, Any] = {}
@@ -340,7 +398,7 @@ class NewsAgentExecutor(AgentExecutor):
             for chunk in get_data_parts(message.parts):
                 if isinstance(chunk, dict):
                     data.update(chunk)
-        return parse_skill_request(
+        return await aparse_skill_request(
             data=data,
             text=text,
             metadata=dict(context.metadata or {}),
@@ -493,5 +551,6 @@ __all__ = [
     "SkillRequestError",
     "TERMINAL_STATES",
     "VALID_SKILL_STRINGS",
+    "aparse_skill_request",
     "parse_skill_request",
 ]

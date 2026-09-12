@@ -28,6 +28,7 @@ from .executor import (
     NewsAgentExecutor,
     SkillRequestError,
     TERMINAL_STATES,
+    aparse_skill_request,
     parse_skill_request,
 )
 from .server import create_app
@@ -45,6 +46,7 @@ __all__ = [
     "PROGRESS_EXTENSION_URI",
     "NewsAgentExecutor",
     "parse_skill_request",
+    "aparse_skill_request",
     "SkillRequestError",
     "TERMINAL_STATES",
     "NewsA2AClient",
