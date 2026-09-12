@@ -232,6 +232,16 @@ class SkillRequest(BaseModel):
     def resolved_since(self, default_days: int = 7) -> datetime:
         return self.since or (utcnow() - timedelta(days=default_days))
 
+    def with_default_window(self, default_days: int) -> "SkillRequest":
+        """未指定 since 且默认窗口天数 > 0 时，把窗口起点设为 now - N 天。
+
+        新闻场景下用户几乎总是期望近期内容；无窗口会导致旧闻混入结果。
+        显式传过 since（含时间表达解析结果）时此方法不做任何事。
+        """
+        if self.since is None and default_days > 0:
+            self.since = utcnow() - timedelta(days=default_days)
+        return self
+
     def cache_key(self, default_days: int = 7) -> str:
         parts = [
             self.query.lower(),

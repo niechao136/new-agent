@@ -43,6 +43,7 @@ from ..graph.agent import NewsAgent
 from ..models import ErrorCode, NewsResult, SkillMode, SkillRequest, utcnow
 from ..runtime import Metrics, ProgressEvent, RunContext, get_logger
 from ..text_utils import truncate
+from ..time_window import parse_time_window
 
 log = get_logger("a2a.executor")
 
@@ -173,19 +174,31 @@ def parse_skill_request(
     else:
         sources = None
 
+    # 时间窗口：调用方显式传入 since 优先；否则从查询中解析
+    # 「本周/昨天/最近N天」等表达；都没有时走默认窗口（default_window_days）。
+    since = payload.get("since")
+    until = payload.get("until")
+    search_query = query
+    if since is None:
+        parsed_since, parsed_until, cleaned = parse_time_window(query)
+        search_query = cleaned or query
+        if parsed_since is not None:
+            since = parsed_since
+            until = parsed_until if parsed_until is not None else until
+
     try:
         return SkillRequest(
             skill=SkillMode.coerce(raw_skill),
-            query=query,
-            since=payload.get("since"),
-            until=payload.get("until"),
+            query=search_query,
+            since=since,
+            until=until,
             limit=limit,
             language=str(payload.get("language") or settings.default_language),
             sources=sources,
             threshold=threshold,
             include_analyzed=bool(payload.get("include_analyzed", True)),
             context_id=context_id,
-        )
+        ).with_default_window(settings.default_window_days)
     except Exception as exc:  # noqa: BLE001 - pydantic validation
         raise SkillRequestError(f"invalid request: {exc}") from exc
 

@@ -31,6 +31,18 @@ GOOGLE_NEWS_RSS = (
 )
 BING_NEWS_RSS = "https://www.bing.com/news/search?q={query}&format=RSS&setlang={hl}"
 
+#: 零配置主题 RSS 源（无需 API key）。它们不是关键词搜索，而是固定栏目流：
+#: 抓回后由相关性过滤按查询取舍，作为 Google/Bing 搜索之外的补充。
+TOPIC_RSS_FEEDS: dict[str, str] = {
+    "36kr": "https://36kr.com/feed",
+    "huxiu": "https://www.huxiu.com/rss/0.xml",
+    "sspai": "https://sspai.com/feed",
+    "solidot": "https://www.solidot.org/index.rss",
+    "techcrunch": "https://techcrunch.com/feed/",
+    "the-verge": "https://www.theverge.com/rss/index.xml",
+    "bbc-tech": "https://feeds.bbci.co.uk/news/technology/rss.xml",
+}
+
 
 def _env(name: str, default: str | None = None) -> str | None:
     value = os.environ.get(ENV_PREFIX + name)
@@ -157,6 +169,8 @@ class Settings(BaseModel):
     default_limit: int = 15
     max_limit: int = 50
     default_mode: str = "summarize_news"
+    #: 查询未携带时间表达时的默认抓取窗口（天）。0 表示不做时间过滤。
+    default_window_days: int = 7
 
     # --- reliability ------------------------------------------------------
     task_timeout_s: float = 180.0
@@ -195,6 +209,16 @@ class Settings(BaseModel):
             ),
             SourceConfig(name="bing-news", type="rss", feeds=[BING_NEWS_RSS], weight=0.8),
         ]
+        if _env_bool("TOPIC_FEEDS", True):
+            for topic_name, topic_feed in TOPIC_RSS_FEEDS.items():
+                sources.append(
+                    SourceConfig(
+                        name=topic_name,
+                        type="rss",
+                        feeds=[topic_feed],
+                        weight=0.6,
+                    )
+                )
         if extra_feeds:
             sources.append(
                 SourceConfig(name="custom-rss", type="rss", feeds=list(extra_feeds), weight=1.0)
@@ -262,6 +286,7 @@ class Settings(BaseModel):
                 default_limit=_env_int("DEFAULT_LIMIT", 15),
                 max_limit=_env_int("MAX_LIMIT", 50),
                 default_mode=_env("DEFAULT_MODE", "summarize_news") or "summarize_news",
+                default_window_days=_env_int("DEFAULT_WINDOW_DAYS", 7),
                 task_timeout_s=_env_float("TASK_TIMEOUT_S", 180.0),
                 fetch_timeout_s=_env_float("FETCH_TIMEOUT_S", 20.0),
                 source_concurrency=_env_int("SOURCE_CONCURRENCY", 4),

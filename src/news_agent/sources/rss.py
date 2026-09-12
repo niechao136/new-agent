@@ -14,7 +14,7 @@ from urllib.parse import quote_plus
 
 import feedparser
 
-from ..models import RawArticle, SkillRequest, ensure_aware
+from ..models import RawArticle, SkillRequest, ensure_aware, utcnow
 from ..text_utils import clean_text, strip_html
 from .base import NewsSource
 from .http import SourceError
@@ -40,14 +40,22 @@ class RSSSource(NewsSource):
     def _render_feeds(self, request: SkillRequest) -> list[str]:
         locale = LOCALE_MAP.get((request.language or "en").lower(), LOCALE_MAP["en"])
         hl, gl, ceid = locale
+        search_term = request.query
+        # Google News RSS 支持 when:Xd 新鲜度操作符；窗口来自请求的时间
+        # 解析（本周/最近N天）或默认窗口。超过 30 天或静态 feed 不附加。
+        if request.since is not None:
+            days = (utcnow() - request.since).days + 1
+            if 0 < days <= 30:
+                search_term = f"{request.query} when:{days}d"
         rendered: list[str] = []
         for template in self.config.feeds:
             if not template:
                 continue
+            term = search_term if "news.google.com" in template else request.query
             try:
                 rendered.append(
                     template.format(
-                        query=quote_plus(request.query),
+                        query=quote_plus(term),
                         language=request.language or "en",
                         hl=hl,
                         gl=gl,
