@@ -26,7 +26,7 @@ from ..models import (
     utcnow,
 )
 from ..quality import filter_spam
-from ..relevance import pick_relevant, rank_articles, relevance_score
+from ..relevance import pick_relevant, rank_articles, relevance_score, select_diverse
 from ..rerank import Reranker, blend_scores
 from ..runtime import Metrics, RunContext, get_logger
 from ..sources import SourceRegistry
@@ -237,12 +237,7 @@ class NewsGraphNodes:
             if self.deps.reranker is not None:
                 retrieve_limit = max(request.limit, self.settings.llm.rerank_max_candidates)
             selected, _, topped_up = pick_relevant(
-                scored,
-                threshold=threshold,
-                limit=retrieve_limit,
-                # 配额按"最终返回条数"计算：多取的候选只是为了给精排留余量，
-                # 不应放宽单一来源的占比上限。
-                per_source_cap=self._per_source_cap(request.limit),
+                scored, threshold=threshold, limit=retrieve_limit
             )
             if topped_up:
                 ctx.add_warning(
@@ -251,8 +246,13 @@ class NewsGraphNodes:
             if deduped and not selected:
                 ctx.add_warning("候选文章均未通过相关度过滤")
             selected, scores = await self._maybe_rerank(request, selected, scores, ctx)
-            if len(selected) > request.limit:
-                selected = selected[: request.limit]
+            # 来源配额在精排之后兑现：精排会打乱顺序，只有在这里裁剪才能保证
+            # 最终结果里没有单一来源霸榜。
+            selected = select_diverse(
+                selected,
+                limit=request.limit,
+                per_source_cap=self._per_source_cap(request.limit),
+            )
             dropped = len(scored) - len(selected)
             ctx.count("articles_selected", len(selected))
             ctx.emit(

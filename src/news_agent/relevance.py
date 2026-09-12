@@ -363,6 +363,37 @@ def diversify(
     return kept + deferred
 
 
+def select_diverse(
+    articles: Sequence[RawArticle],
+    *,
+    limit: int,
+    per_source_cap: int | None = None,
+) -> list[RawArticle]:
+    """Pick ``limit`` articles honouring a per-source cap.
+
+    Applied *after* re-ranking (which can reshuffle sources), so the cap is a
+    property of the returned set rather than of the pre-rerank ordering.  The cap
+    is best-effort: when there is not enough material from other sources the
+    overflow fills the remaining slots instead of returning a short result.
+    """
+    if per_source_cap is None or per_source_cap <= 0:
+        return list(articles[:limit])
+    kept: list[RawArticle] = []
+    overflow: list[RawArticle] = []
+    counts: dict[str, int] = {}
+    for article in articles:
+        source = article.source
+        if counts.get(source, 0) < per_source_cap:
+            counts[source] = counts.get(source, 0) + 1
+            kept.append(article)
+        else:
+            overflow.append(article)
+    result = kept[:limit]
+    if len(result) < limit:
+        result = result + overflow[: limit - len(result)]
+    return result
+
+
 def pick_relevant(
     scored: Sequence[tuple[RawArticle, float]],
     *,
@@ -424,6 +455,7 @@ __all__ = [
     "pick_relevant",
     "rank_articles",
     "relevance_score",
+    "select_diverse",
     "select_relevant",
     "topic_floor",
 ]

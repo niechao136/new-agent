@@ -16,6 +16,7 @@ from news_agent.relevance import (
     pick_relevant,
     rank_articles,
     relevance_score,
+    select_diverse,
     select_relevant,
     topic_floor,
 )
@@ -231,6 +232,27 @@ def test_select_relevant_respects_limit(article_factory):
     )
     assert len(selected) == 5
     assert dropped == 15
+
+
+def test_select_diverse_respects_cap_and_fills_when_scarce(article_factory):
+    dominant = [article_factory(f"人形机器人观察 {index}", source="a") for index in range(6)]
+    others = [article_factory(f"人形机器人动态 {index}", source="b") for index in range(2)]
+    picked = select_diverse([*dominant, *others], limit=6, per_source_cap=3)
+    assert len(picked) == 6
+    # 另一来源只有 2 篇，配额内凑不满 6 篇，因此用溢出项补 1 篇
+    assert sum(1 for article in picked if article.source == "a") == 4
+    assert sum(1 for article in picked if article.source == "b") == 2
+
+    # 素材充足时严格生效
+    plenty = [article_factory(f"人形机器人观察 {index}", source="a") for index in range(6)]
+    plenty += [article_factory(f"人形机器人动态 {index}", source="b") for index in range(6)]
+    strict = select_diverse(plenty, limit=6, per_source_cap=3)
+    assert sum(1 for article in strict if article.source == "a") == 3
+    assert sum(1 for article in strict if article.source == "b") == 3
+    # 素材不足时用溢出项补满，而不是返回短列表
+    only_dominant = [article_factory(f"人形机器人周报 {index}", source="a") for index in range(5)]
+    assert len(select_diverse(only_dominant, limit=4, per_source_cap=2)) == 4
+    assert select_diverse(only_dominant, limit=4, per_source_cap=None) == only_dominant[:4]
 
 
 def test_pick_relevant_applies_source_cap(article_factory):
