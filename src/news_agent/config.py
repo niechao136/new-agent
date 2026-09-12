@@ -147,9 +147,9 @@ class Settings(BaseModel):
         "analysis (entities / events / sentiment / stance) and map-reduce "
         "summarisation, exposed over the A2A protocol."
     )
-    agent_url: str = "http://localhost:8080"
+    agent_url: str = "http://localhost:9901"
     host: str = "0.0.0.0"
-    port: int = 8080
+    port: int = 9901
     log_level: str = "INFO"
 
     # --- request defaults -------------------------------------------------
@@ -254,9 +254,9 @@ class Settings(BaseModel):
             return cls(
                 agent_name=_env("AGENT_NAME", "news-agent") or "news-agent",
                 agent_version=_env("AGENT_VERSION", "0.1.0") or "0.1.0",
-                agent_url=_env("AGENT_URL", "http://localhost:8080") or "http://localhost:8080",
+                agent_url=_env("AGENT_URL", "http://localhost:9901") or "http://localhost:9901",
                 host=_env("HOST", "0.0.0.0") or "0.0.0.0",
-                port=_env_int("PORT", 8080),
+                port=_env_int("PORT", 9901),
                 log_level=_env("LOG_LEVEL", "INFO") or "INFO",
                 default_language=_env("DEFAULT_LANGUAGE", "zh") or "zh",
                 default_limit=_env_int("DEFAULT_LIMIT", 15),

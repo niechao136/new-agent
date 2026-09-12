@@ -1,0 +1,69 @@
+# docker compose up --build -d
+# docker compose logs -f news-agent
+# docker compose run --rm news-agent run "人形机器人" --mock --no-llm   # 离线冒烟
+#
+# Values are taken from the shell or from a local `.env` file when present
+# (`${VAR:-default}`); copy .env.example to .env to customise.
+
+services:
+  news-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: news-agent:0.1.0
+    restart: unless-stopped
+    # host:container - both follow NEWS_AGENT_PORT, so changing it in .env is enough
+    ports:
+      - "${NEWS_AGENT_PORT:-9901}:${NEWS_AGENT_PORT:-9901}"
+    environment:
+      # --- public identity -------------------------------------------------
+      # MUST be the URL that *callers* use: the A2A agent card advertises it and
+      # standard clients (including a2a-sdk) connect to it for follow-up calls.
+      NEWS_AGENT_AGENT_URL: ${NEWS_AGENT_AGENT_URL:-http://localhost:9901}
+      NEWS_AGENT_LOG_LEVEL: ${NEWS_AGENT_LOG_LEVEL:-INFO}
+
+      # --- container runtime ------------------------------------------------
+      NEWS_AGENT_HOST: 0.0.0.0
+      NEWS_AGENT_PORT: "${NEWS_AGENT_PORT:-9901}"
+      NEWS_AGENT_CACHE_PATH: /data/news_agent.sqlite3
+      NEWS_AGENT_CACHE_TTL_S: ${NEWS_AGENT_CACHE_TTL_S:-900}
+      NEWS_AGENT_TASK_TIMEOUT_S: ${NEWS_AGENT_TASK_TIMEOUT_S:-180}
+
+      # --- LLM (OpenAI compatible: OpenAI / vLLM / DeepSeek / ...) ----------
+      # Leave BASE_URL/API_KEY empty to stay in offline heuristic mode.
+      NEWS_AGENT_LLM_ENABLED: ${NEWS_AGENT_LLM_ENABLED:-1}
+      NEWS_AGENT_LLM_MODEL: ${NEWS_AGENT_LLM_MODEL:-gpt-4o-mini}
+      NEWS_AGENT_LLM_BASE_URL: ${NEWS_AGENT_LLM_BASE_URL:-}
+      NEWS_AGENT_LLM_API_KEY: ${NEWS_AGENT_LLM_API_KEY:-}
+
+      # --- news sources -----------------------------------------------------
+      # 1 = deterministic in-process source (offline demo / CI smoke test)
+      NEWS_AGENT_USE_MOCK: ${NEWS_AGENT_USE_MOCK:-0}
+      NEWS_AGENT_NEWSAPI_KEY: ${NEWS_AGENT_NEWSAPI_KEY:-}
+      NEWS_AGENT_GNEWS_KEY: ${NEWS_AGENT_GNEWS_KEY:-}
+      NEWS_AGENT_EXTRA_RSS_FEEDS: ${NEWS_AGENT_EXTRA_RSS_FEEDS:-}
+      NEWS_AGENT_RELEVANCE_THRESHOLD: ${NEWS_AGENT_RELEVANCE_THRESHOLD:-0.2}
+    volumes:
+      # SQLite cache + article history; keeps warm data across restarts
+      - news-agent-data:/data
+    # The image ships a HEALTHCHECK against /healthz; tune it per environment:
+    healthcheck:
+      test: ["CMD", "news-agent", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Uncomment to bound the container on a shared host:
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: "1.0"
+    #       memory: 1g
+
+volumes:
+  news-agent-data:

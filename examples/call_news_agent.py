@@ -11,7 +11,7 @@ talks to the news agent:
 
 Run it against a locally started agent:
 
-    news-agent serve --port 8080                    # terminal 1
+    news-agent serve --port 9901                    # terminal 1
     python examples/call_news_agent.py              # terminal 2
     python examples/call_news_agent.py --skill analyze_trend --query "固态电池" --json
 """
@@ -85,7 +85,7 @@ def show_result(task: Any) -> None:
 
 async def main() -> int:
     parser = argparse.ArgumentParser(description="Call the news agent over A2A")
-    parser.add_argument("--base-url", default="http://localhost:8080")
+    parser.add_argument("--base-url", default="http://localhost:9901")
     parser.add_argument("--query", default="人形机器人")
     parser.add_argument(
         "--skill", default="summarize_news", choices=[mode.value for mode in SkillMode]
@@ -98,7 +98,14 @@ async def main() -> int:
     parser.add_argument("--list-tasks", action="store_true", help="also list agent tasks")
     args = parser.parse_args()
 
-    async with NewsA2AClient(args.base_url, streaming=True, timeout=300) as client:
+    async with NewsA2AClient(
+        args.base_url,
+        streaming=True,
+        timeout=300,
+        # use the address we were pointed at instead of the one the card
+        # advertises (they differ behind proxies / port-forwarded containers)
+        interface_url=args.base_url,
+    ) as client:
         card = await client.connect()
         show_card(card)
         print()

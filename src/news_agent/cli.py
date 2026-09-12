@@ -54,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     call = sub.add_parser("call", help="call a running agent over A2A")
     call.add_argument("query")
-    call.add_argument("--base-url", default="http://localhost:8080")
+    call.add_argument("--base-url", default="http://localhost:9901")
     call.add_argument("--skill", default="summarize_news")
     call.add_argument("--limit", type=int, default=None)
     call.add_argument("--language", default=None)
@@ -63,8 +63,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     task = sub.add_parser("task", help="inspect a task on a running agent")
     task.add_argument("task_id")
-    task.add_argument("--base-url", default="http://localhost:8080")
+    task.add_argument("--base-url", default="http://localhost:9901")
     task.add_argument("--cancel", action="store_true")
+
+    health = sub.add_parser(
+        "healthcheck", help="probe a running agent (exit code 0/1, used by Docker)"
+    )
+    health.add_argument(
+        "--base-url",
+        default=None,
+        help="defaults to http://127.0.0.1:<NEWS_AGENT_PORT or 9901>",
+    )
+    health.add_argument("--timeout", type=float, default=5.0)
+    health.add_argument(
+        "--ready",
+        action="store_true",
+        help="probe /readyz instead of /healthz (also warms up the agent)",
+    )
 
     return parser
 
@@ -204,7 +219,12 @@ async def _run_call(args: argparse.Namespace) -> int:
 
     settings = _settings_from_args(args)
     async with NewsA2AClient(
-        args.base_url, streaming=True, timeout=max(60.0, settings.task_timeout_s)
+        args.base_url,
+        streaming=True,
+        timeout=max(60.0, settings.task_timeout_s),
+        # talk to the address the caller actually typed, even if the agent card
+        # advertises a different public URL (proxies / port-forwarded containers)
+        interface_url=args.base_url,
     ) as client:
         card = await client.connect()
         print(
@@ -263,10 +283,39 @@ async def _run_call(args: argparse.Namespace) -> int:
     return 0 if state == "completed" else 1
 
 
+async def _run_healthcheck(args: argparse.Namespace) -> int:
+    """HTTP probe used by the container HEALTHCHECK (exit 0 = healthy)."""
+    import httpx
+
+    settings = _settings_from_args(args)
+    base_url = (args.base_url or f"http://127.0.0.1:{settings.port}").rstrip("/")
+    path = "/readyz" if args.ready else "/healthz"
+    try:
+        async with httpx.AsyncClient(timeout=args.timeout) as client:
+            response = await client.get(f"{base_url}{path}")
+    except Exception as exc:  # noqa: BLE001 - any transport error means unhealthy
+        print(
+            f"unhealthy: cannot reach {base_url}{path} "
+            f"({type(exc).__name__}: {exc})",
+            file=sys.stderr,
+        )
+        return 1
+    if response.status_code != 200:
+        print(f"unhealthy: {path} returned HTTP {response.status_code}", file=sys.stderr)
+        return 1
+    try:
+        print(json.dumps(response.json(), ensure_ascii=False))
+    except ValueError:  # pragma: no cover - non JSON body
+        print(f"healthy: {path} returned HTTP 200")
+    return 0
+
+
 async def _run_task(args: argparse.Namespace) -> int:
     from .a2a.client import NewsA2AClient
 
-    async with NewsA2AClient(args.base_url, timeout=120) as client:
+    async with NewsA2AClient(
+        args.base_url, timeout=120, interface_url=args.base_url
+    ) as client:
         if args.cancel:
             task = await client.cancel_task(args.task_id)
         else:
@@ -294,6 +343,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return asyncio.run(_run_call(args))
     if args.command == "task":
         return asyncio.run(_run_task(args))
+    if args.command == "healthcheck":
+        return asyncio.run(_run_healthcheck(args))
     parser.error(f"unknown command: {args.command}")  # pragma: no cover - argparse exits
 
 

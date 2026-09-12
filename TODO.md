@@ -79,5 +79,5 @@
 ```bash
 python -m pytest -q                                  # 64 passed，全程离线
 python -m news_agent.cli run "人形机器人" --mock --no-llm --limit 6
-python -m news_agent.cli serve --port 8080           # 另开终端跑 examples/call_news_agent.py
+python -m news_agent.cli serve --port 9901           # 另开终端跑 examples/call_news_agent.py
 ```

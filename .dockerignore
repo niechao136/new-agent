@@ -1,0 +1,47 @@
+# ---------------------------------------------------------------------------
+# Keep the build context small and free of secrets / host state.
+# Note: README.md is required by the wheel build (pyproject `readme`), so it is
+# deliberately re-included at the end.
+# ---------------------------------------------------------------------------
+
+# version control
+.git
+.gitignore
+.gitattributes
+
+# host virtualenvs & tooling caches
+.venv
+venv
+__pycache__
+**/__pycache__
+*.py[cod]
+*.egg-info
+dist
+build
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.tmp_*
+
+# runtime state
+.cache
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+data
+
+# secrets must never reach the daemon
+.env
+.env.*
+
+# tests / examples are not part of the runtime image
+tests
+examples
+
+# editor & docs noise
+.idea
+.vscode
+docs
+*.md
+!README.md
+TODO.md

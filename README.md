@@ -27,6 +27,7 @@
 | 稳定降级 | 源不可用/超时/LLM 失败/任务超时都返回**部分结果 + 结构化错误码**，绝不静默 |
 | 可观测性 | 每节点耗时、抓取成功率、LLM token 数、`/metrics` 指标快照 |
 | 离线可跑 | 不配置任何 key（甚至无网络）也能用 mock 源 + 启发式分析完整跑通 |
+| 容器化部署 | 多阶段 `Dockerfile`（依赖锁文件安装、非 root、内置健康检查）+ `docker-compose.yml` |
 
 ---
 
@@ -50,10 +51,13 @@ src/news_agent/
     executor.py       #   AgentExecutor：RequestContext ⇄ SkillRequest ⇄ LangGraph
     server.py         #   组装 SDK 路由的 FastAPI app（+ 运维端点）
     client.py         #   SDK 客户端的便捷封装（CLI / examples 使用）
-  cli.py              # serve | card | skills | sources | run | call | task
+  cli.py              # serve | card | skills | sources | run | call | task | healthcheck
 src/main.py           # 兼容入口（python src/main.py ...）
 examples/call_news_agent.py   # 端到端 A2A 调用示例（SDK 客户端）
-tests/                # 68 个单元/集成测试（全部离线）
+tests/                # 单元/集成测试（全部离线）
+Dockerfile            # 多阶段镜像：uv 锁定依赖 → 自包含 venv，非 root 运行
+docker-compose.yml    # 一键部署（健康检查、数据卷、环境变量透传）
+.dockerignore         # 构建上下文裁剪（排除 .venv/.env/缓存/测试）
 ```
 
 ---
@@ -77,21 +81,21 @@ python -m news_agent.cli run "人形机器人" --mock --no-llm --skill analyze_t
 ### 3.3 启动 A2A 服务
 
 ```bash
-python -m news_agent.cli serve --port 8080
+python -m news_agent.cli serve --port 9901
 # 或
-uvicorn news_agent.a2a.server:app_factory --factory --host 0.0.0.0 --port 8080
+uvicorn news_agent.a2a.server:app_factory --factory --host 0.0.0.0 --port 9901
 ```
 
 ```bash
-curl http://localhost:8080/.well-known/agent-card.json     # Agent Card（A2A 1.0 路径）
-curl http://localhost:8080/.well-known/agent.json          # Agent Card（0.3 兼容路径）
-curl http://localhost:8080/healthz                         # 存活探针
-curl http://localhost:8080/readyz                          # 就绪探针（会预热 agent）
-curl http://localhost:8080/metrics                         # 指标快照
-curl http://localhost:8080/skills                          # skill 清单 + 输出 JSON Schema
+curl http://localhost:9901/.well-known/agent-card.json     # Agent Card（A2A 1.0 路径）
+curl http://localhost:9901/.well-known/agent.json          # Agent Card（0.3 兼容路径）
+curl http://localhost:9901/healthz                         # 存活探针
+curl http://localhost:9901/readyz                          # 就绪探针（会预热 agent）
+curl http://localhost:9901/metrics                         # 指标快照
+curl http://localhost:9901/skills                          # skill 清单 + 输出 JSON Schema
 
 # 提交任务（A2A 1.0 JSON-RPC 方法名，需要 A2A-Version 头）
-curl -s http://localhost:8080/ \
+curl -s http://localhost:9901/ \
   -H 'content-type: application/json' -H 'A2A-Version: 1.0' -d '{
   "jsonrpc": "2.0", "id": 1, "method": "SendMessage",
   "params": {"message": {"messageId": "m1", "role": "ROLE_USER", "parts": [
@@ -100,17 +104,17 @@ curl -s http://localhost:8080/ \
 }'
 
 # 0.3 兼容写法的同一个任务（无需 A2A-Version 头）
-curl -s http://localhost:8080/ -H 'content-type: application/json' -d '{
+curl -s http://localhost:9901/ -H 'content-type: application/json' -d '{
   "jsonrpc": "2.0", "id": 2, "method": "message/send",
   "params": {"message": {"role": "user", "messageId": "m2",
     "parts": [{"kind": "data", "data": {"query": "固态电池", "limit": 10}}]}}
 }'
 
-curl -s http://localhost:8080/ -H 'content-type: application/json' -H 'A2A-Version: 1.0' \
+curl -s http://localhost:9901/ -H 'content-type: application/json' -H 'A2A-Version: 1.0' \
   -d '{"jsonrpc":"2.0","id":3,"method":"GetTask","params":{"id":"<taskId>","historyLength":50}}'
 
 # HTTP+JSON（REST）绑定
-curl -s -X POST http://localhost:8080/message:send -H 'A2A-Version: 1.0' \
+curl -s -X POST http://localhost:9901/message:send -H 'A2A-Version: 1.0' \
   -H 'content-type: application/json' \
   -d '{"message":{"messageId":"m3","role":"ROLE_USER","parts":[{"data":{"query":"固态电池"}}]}}'
 ```
@@ -155,6 +159,64 @@ export NEWS_AGENT_GNEWS_KEY=xxx          # 可选，启用 GNews
 > 默认源是 Google News / Bing News 的 RSS 搜索，**无需 API key**。
 > 不配置 LLM 时自动走启发式分析，接口与输出 schema 完全一致，只是 `metrics.analyzer` 变为 `heuristic`。
 
+### 3.6 Docker 部署
+
+镜像两阶段构建：第一段用 `uv` 按 `uv.lock` 把依赖装进自包含的 `/opt/venv`，
+第二段只拷贝这个 venv（不带编译器、uv、测试代码），以 UID 10001 非 root 运行。
+
+```bash
+# 构建 + 运行
+docker build -t news-agent:0.1.0 .
+docker run --rm -p 9901:9901 \
+  -e NEWS_AGENT_AGENT_URL=http://localhost:9901 \
+  -v news-agent-data:/data \
+  news-agent:0.1.0
+
+# 或使用 compose（同目录存在 .env 时自动用于 ${VAR:-default} 替换）
+cp .env.example .env          # 可选：填 LLM / 新闻源 key
+docker compose up --build -d
+docker compose logs -f news-agent
+docker compose down           # 加 -v 连数据卷一起删
+```
+
+容器内的约定：
+
+| 项 | 值 |
+| --- | --- |
+| 监听地址 | `NEWS_AGENT_HOST=0.0.0.0`、`NEWS_AGENT_PORT=9901`（改这两个变量即可换端口，无需重建镜像） |
+| 缓存与历史 | `NEWS_AGENT_CACHE_PATH=/data/news_agent.sqlite3`，用卷 `news-agent-data` 持久化 |
+| 运行用户 | `app`（UID/GID 10001），`/data` 归其所有 |
+| 健康检查 | `news-agent healthcheck` 探 `/healthz`；设 `NEWS_AGENT_HEALTHCHECK_ARGS=--ready` 可改用 `/readyz`（会预热 agent） |
+| 启动命令 | `news-agent serve`（uvicorn，收到 SIGTERM 优雅退出） |
+
+常用操作：
+
+```bash
+docker compose exec news-agent news-agent card          # 查看容器内的 Agent Card
+docker compose exec news-agent news-agent healthcheck   # 手动探活
+curl -s localhost:9901/.well-known/agent-card.json | head -c 200
+
+# 完全离线冒烟（mock 源 + 启发式分析，不访问网络与 LLM）
+docker compose run --rm -e NEWS_AGENT_USE_MOCK=1 -e NEWS_AGENT_LLM_ENABLED=0 \
+  news-agent run "人形机器人" --limit 5
+
+# 在宿主机上调用容器里的 agent
+python -m news_agent.cli call "固态电池" --base-url http://localhost:9901
+```
+
+> **`NEWS_AGENT_AGENT_URL` 必须是调用方能访问的地址**：它是 Agent Card 里
+> `supportedInterfaces[].url` 的值，标准 A2A 客户端（含 `a2a-sdk`）会按它发起后续调用。
+> 容器里不要写 `127.0.0.1`（跨容器的调用方会连到它自己），生产环境应写对外域名。
+> 本项目自带的 `news-agent call --base-url ...` 会在本地覆盖卡片地址，方便端口映射/调试场景。
+
+部署注意：
+
+- 镜像按**单副本**设计：任务状态默认在进程内存（SDK `InMemoryTaskStore`）。
+  多副本需要换成 SDK 的 `DatabaseTaskStore` 并让所有副本共享同一数据库（见 §10）；
+- 多架构构建：`docker buildx build --platform linux/amd64,linux/arm64 -t news-agent:0.1.0 --push .`
+  （依赖均有对应 wheel，镜像内不需要编译工具链）；
+- 依赖层只在 `pyproject.toml` / `uv.lock` 变化时重建，改业务代码只重建项目层。
+
 ---
 
 ## 4. 配置项
@@ -163,8 +225,8 @@ export NEWS_AGENT_GNEWS_KEY=xxx          # 可选，启用 GNews
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `AGENT_NAME` / `AGENT_VERSION` / `AGENT_URL` | news-agent / 0.1.0 / http://localhost:8080 | Agent Card 身份信息（`AGENT_URL` 同时用于 card 的 interface URL） |
-| `HOST` / `PORT` | 0.0.0.0 / 8080 | 服务监听地址 |
+| `AGENT_NAME` / `AGENT_VERSION` / `AGENT_URL` | news-agent / 0.1.0 / http://localhost:9901 | Agent Card 身份信息；`AGENT_URL` 同时是 card 的 `supportedInterfaces[].url`，**容器/网关环境必须设为调用方可达的地址** |
+| `HOST` / `PORT` | 0.0.0.0 / 9901 | 服务监听地址 |
 | `DEFAULT_LANGUAGE` / `DEFAULT_LIMIT` / `MAX_LIMIT` | zh / 15 / 50 | 请求默认值与上限 |
 | `DEFAULT_MODE` | summarize_news | 未显式指定 skill 时的默认技能 |
 | `TASK_TIMEOUT_S` | 180 | 单任务最大执行时间（超时返回部分结果） |
@@ -192,8 +254,8 @@ export NEWS_AGENT_GNEWS_KEY=xxx          # 可选，启用 GNews
   "description": "...",
   "version": "0.1.0",
   "supportedInterfaces": [
-    { "url": "http://localhost:8080", "protocolBinding": "JSONRPC",   "protocolVersion": "1.0" },
-    { "url": "http://localhost:8080", "protocolBinding": "HTTP+JSON", "protocolVersion": "1.0" }
+    { "url": "http://localhost:9901", "protocolBinding": "JSONRPC",   "protocolVersion": "1.0" },
+    { "url": "http://localhost:9901", "protocolBinding": "HTTP+JSON", "protocolVersion": "1.0" }
   ],
   "capabilities": {
     "streaming": true,

@@ -2,7 +2,7 @@
 
 It removes the protocol boilerplate so other agents / the CLI can do::
 
-    async with NewsA2AClient("http://localhost:8080") as client:
+    async with NewsA2AClient("http://localhost:9901") as client:
         async for update in client.send("人形机器人", skill="analyze_trend"):
             print(update.stage, update.message)
         task = update.task          # terminal task with the news-result artifact
