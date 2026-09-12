@@ -29,12 +29,17 @@ RUN pip install --no-cache-dir "uv==${UV_VERSION}"
 WORKDIR /app
 
 # Dependency layer: only the manifests, so application code changes do not
-# invalidate the (slow) dependency install.
-COPY pyproject.toml uv.lock README.md ./
+# invalidate the (slow) dependency install.  README.md deliberately lives in the
+# project layer below: pyproject declares it as the project readme, so copying it
+# here would invalidate this layer (and re-download every dependency) on any
+# documentation edit.  uv only reads it when it actually builds the project,
+# which happens in the next layer.
+COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 # Project layer: install the agent itself as a real wheel (--no-editable), so the
 # runtime image needs neither the sources nor a src/ path hack.
+COPY README.md ./
 COPY src ./src
 RUN uv sync --frozen --no-dev --no-editable
 
