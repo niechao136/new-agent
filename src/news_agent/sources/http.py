@@ -97,12 +97,16 @@ class HttpClient:
         if headers:
             merged_headers.update(headers)
         try:
-            response = await self._client.get(
-                url,
-                params=dict(params or {}),
-                headers=merged_headers,
-                timeout=timeout or self._settings.fetch_timeout_s,
-            )
+            request_kwargs: dict = {
+                "headers": merged_headers,
+                "timeout": timeout or self._settings.fetch_timeout_s,
+            }
+            # 注意：httpx 在传入 params 时会「替换」掉 URL 原有的查询串，
+            # 传空 dict 会把内联在 URL 里的 ?q=... 清空，导致目标返回 404 / HTML。
+            # 因此仅在 params 非空时才传给 httpx，保留 URL 自带查询。
+            if params:
+                request_kwargs["params"] = params
+            response = await self._client.get(url, **request_kwargs)
         except httpx.TimeoutException as exc:
             raise SourceError(
                 ErrorCode.FETCH_TIMEOUT, f"request to {url} timed out", retryable=True
