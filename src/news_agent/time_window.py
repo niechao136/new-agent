@@ -28,11 +28,13 @@ _LAST_MONTH = re.compile(r"上个月|上月|\blast month\b", re.IGNORECASE)
 _THIS_YEAR = re.compile(r"今年|\bthis year\b", re.IGNORECASE)
 _BARE_RECENT = re.compile(r"近日|最近|近期|\brecently\b|\blately\b", re.IGNORECASE)
 
-# 与搜索无关的口语化填充词（仅在清理后仍保留足够内容时才生效）。
+# 与搜索无关的口语化填充词/停用词（仅在清理后仍保留足够内容时才生效）。
+# 「的」是中文搜索停用词，直接删除；「请」同理。
 _FILLERS = re.compile(
-    r"帮我|请你|麻烦你?|给我|我想|我要|"
+    r"帮我|请问|请你|麻烦你?|给我|我想|我要|请|"
     r"汇总|总结|归纳|梳理|整理|概括|搜集|收集|查一下|搜索|检索|"
-    r"相关|一下|看看|说说|讲讲"
+    r"相关|一下|看看|说说|讲讲|"
+    r"的"
 )
 _DANGLING = re.compile(r"^[的了吗呢吧啊，。、！？\s]+|[的了吗呢吧啊，。、！？\s]+$")
 

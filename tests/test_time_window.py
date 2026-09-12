@@ -18,6 +18,12 @@ def test_this_week_parses_to_monday_and_cleans_query():
     assert cleaned == "科技新闻"
 
 
+def test_polite_prefix_and_particle_removed():
+    # 线上实际输入带「请」且时间词后接「的」
+    _, _, cleaned = parse_time_window("请帮我汇总一下本周的科技新闻", now=_now())
+    assert cleaned == "科技新闻"
+
+
 def test_recent_n_days():
     since, _, cleaned = parse_time_window("最近7天的AI新闻", now=_now())
     assert since is not None
