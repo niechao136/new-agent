@@ -20,7 +20,8 @@
 | 多源抓取 | RSS（Google News / Bing News，免 key）、NewsAPI、GNews、内置 mock 源 |
 | 统一源抽象 | `NewsSource.fetch(query, since, limit)`，新增源只需实现 `_fetch` |
 | 三重去重 | URL 规范化 → 标题规范化 → SimHash/标题相似度模糊匹配 |
-| 相关性过滤 | 可解释的 token 重叠打分（中英混排友好），低分结果降级保留而非直接丢失 |
+| 相关性过滤 | 可解释的 token 重叠打分 + 连续匹配约束（抑制 CJK 跨界 bigram 误召回）+ 多语言关键词匹配（中英互查）；来源权重排序 + 来源配额去偏 |
+| 可选 LLM 精排 | 对通过阈值的候选做一次结构化相关性重排，分数融合进排序；失败自动退回词面排序 |
 | 结构化抽取 | LLM structured output（OpenAI 兼容 / vLLM），分 batch + 并发上限 |
 | 长文本处理 | map-reduce 摘要，避免超长 prompt；分批小结失败可退化为拼接 |
 | 双缓存 | SQLite 抓取缓存（TTL）+ 结果缓存 + 文章历史（增量识别新文章） |
@@ -40,7 +41,9 @@ src/news_agent/
   text_utils.py       # CJK 感知分词、URL 规范化、HTML 清洗
   runtime.py          # Metrics + RunContext（进度事件 / 阶段耗时 / 部分结果）
   dedup.py            # 去重（URL / 标题 / SimHash）
+  intent.py           # 查询意图解析（主题关键词 + 时间窗口，LLM 优先 / 正则回退）
   relevance.py        # 相关性打分与筛选
+  rerank.py           # 可选 LLM 精排（与词面分融合）
   trends.py           # 话题级趋势聚合
   cache.py            # SQLite 缓存 + 增量文章历史
   analyzer.py         # HeuristicAnalyzer / LLMAnalyzer / FallbackAnalyzer
@@ -233,7 +236,10 @@ python -m news_agent.cli call "固态电池" --base-url http://localhost:9901
 | `FETCH_TIMEOUT_S` | 20 | 单个源单次请求超时 |
 | `SOURCE_CONCURRENCY` | 4 | 并发源数量上限 |
 | `RELEVANCE_THRESHOLD` | 0.2 | 相关性阈值 |
+| `RERANK_ENABLED` | 1 | 是否启用 LLM 精排（需配置 LLM，否则自动跳过） |
+| `SOURCE_DIVERSITY` | 1 | 是否限制单一来源占比（上限 `ceil(limit/3)`，至少 3 篇） |
 | `MAX_ARTICLES_FOR_LLM` | 20 | 送 LLM 的文章上限，超出部分走启发式 |
+| `LLM_RERANK_MAX_CANDIDATES` / `LLM_RERANK_MAX_EXCERPT_CHARS` | 30 / 200 | 精排候选数与每篇摘要字符上限 |
 | `CACHE_ENABLED` / `CACHE_PATH` / `CACHE_TTL_S` | 1 / .cache/news_agent.sqlite3 / 900 | 抓取缓存 |
 | `LLM_ENABLED` / `LLM_MODEL` / `LLM_BASE_URL` / `LLM_API_KEY` | 1 / gpt-4o-mini / - / - | OpenAI 兼容端点（兼容 `OPENAI_API_KEY` / `OPENAI_BASE_URL`） |
 | `LLM_BATCH_SIZE` / `LLM_CONCURRENCY` / `LLM_SUMMARY_CHUNK_SIZE` | 6 / 4 / 6 | 批大小、并发上限、map-reduce 分块 |
@@ -300,6 +306,7 @@ python -m news_agent.cli call "固态电池" --base-url http://localhost:9901
 | `query` | string | 必填 | 关键词 / 领域 / 话题 |
 | `skill` | enum | `summarize_news` | `fetch_news` / `summarize_news` / `analyze_trend` |
 | `since` / `until` | ISO 8601 | - | 时间窗口 |
+| `keywords` | string[] | LLM 解析结果 | 相关性匹配用的扩展关键词（同义词/英文译名），不改变抓取请求 |
 | `limit` | int | 15 | 返回文章数上限（服务端 clamp 到 `MAX_LIMIT`） |
 | `language` | string | zh | 结果与摘要语言 |
 | `sources` | string[] | 全部启用源 | 指定新闻源 |
@@ -426,7 +433,7 @@ START ─▶ fetch ─▶ filter ─┬─▶ (skill = fetch_news / 无结果) �
 | 节点 | 职责 |
 | --- | --- |
 | `fetch_node` | 并发调用多个 `NewsSource`（`asyncio.gather` + 并发上限 + 每源超时 + tenacity 重试）；命中缓存则跳过抓取；写入增量历史 |
-| `filter_node` | 三重去重 → 相关性打分 → 阈值过滤 → 数量截断（低于阈值时按 best-effort 补齐并告警） |
+| `filter_node` | 三重去重 → 相关性打分（连续匹配约束 + 多关键词）→ 来源权重排序 → 来源配额去偏 → 阈值过滤 → 数量截断（低于阈值时按 best-effort 补齐并告警）→ 可选 LLM 精排；分数写入 state 供下游复用 |
 | `analyze_node` | 分批 + 并发受限的 LLM structured output（实体/事件/情感/立场/要点/摘要）；超预算与失败批次用启发式补齐 |
 | `summarize_node` | map-reduce：分批小结 → 合并综述（避免一次性塞进 context） |
 | `format_node` | 组装 `NewsResult`（含 trends、counts、timings、metrics），写入 `RunContext.partial` |

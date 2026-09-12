@@ -50,6 +50,15 @@ _REQUEST_SCHEMA: dict[str, Any] = {
             "default": SkillMode.SUMMARIZE.value,
             "description": "要执行的技能；缺省时取服务端 DEFAULT_MODE。",
         },
+        "keywords": {
+            "type": "array",
+            "items": {"type": "string", "maxLength": 64},
+            "maxItems": 8,
+            "description": (
+                "相关性匹配用的扩展关键词（同义词 / 英文译名等，可选）。"
+                "缺省时由服务端 LLM 意图解析自动生成。"
+            ),
+        },
         "since": {
             "type": "string",
             "format": "date-time",

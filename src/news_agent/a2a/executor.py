@@ -123,6 +123,26 @@ def _extract_payload(
     return payload
 
 
+def _merge_keywords(
+    parsed: list[str] | None,
+    payload: dict[str, Any],
+    query: str,
+) -> list[str]:
+    """Combine LLM keywords with caller supplied ones (``keywords``/``expanded_keywords``)."""
+    raw = payload.get("expanded_keywords") or payload.get("keywords")
+    extra: list[str] = []
+    if isinstance(raw, (list, tuple)):
+        extra = [str(item).strip() for item in raw]
+    elif isinstance(raw, str) and raw.strip() and raw.strip() != query:
+        # list 形式一定是扩展词；字符串只有在与 query 不同时才算
+        extra = [part.strip() for part in re.split(r"[,，;；\s]+", raw)]
+    merged: list[str] = []
+    for item in [*(parsed or []), *extra]:
+        if item and item != query and item not in merged:
+            merged.append(item)
+    return merged
+
+
 async def aparse_skill_request(
     *,
     data: dict[str, Any] | None = None,
@@ -141,13 +161,16 @@ async def aparse_skill_request(
     metadata = dict(metadata or {})
 
     time_window: tuple[datetime | None, datetime | None, str] | None = None
+    keywords: list[str] | None = None
     if payload.get("since") is None:
         query = payload.get("query") or metadata.get("query") or ""
         if isinstance(query, (list, tuple)):
             query = " ".join(str(item) for item in query)
         query = str(query).strip()[:300]
         if query:
-            time_window = await parse_query_intent(query, settings.llm)
+            intent = await parse_query_intent(query, settings.llm)
+            time_window = (intent.since, intent.until, intent.search_query)
+            keywords = intent.keywords
 
     return parse_skill_request(
         data=payload,
@@ -155,6 +178,7 @@ async def aparse_skill_request(
         context_id=context_id,
         settings=settings,
         time_window=time_window,
+        keywords=keywords,
     )
 
 
@@ -166,6 +190,7 @@ def parse_skill_request(
     context_id: str | None = None,
     settings: Settings,
     time_window: tuple[datetime | None, datetime | None, str] | None = None,
+    keywords: list[str] | None = None,
 ) -> SkillRequest:
     """Normalise an A2A message payload into a validated :class:`SkillRequest`.
 
@@ -175,7 +200,8 @@ def parse_skill_request(
 
     ``time_window`` allows the caller (usually :func:`aparse_skill_request`)
     to inject a pre-parsed ``(since, until, cleaned_query)`` result, e.g. one
-    produced by the LLM intent parser.
+    produced by the LLM intent parser.  ``keywords`` carries retrieval keywords
+    (translations / aliases) that are only used for relevance matching.
     """
     payload = _extract_payload(data, text, metadata)
     metadata = dict(metadata or {})
@@ -248,6 +274,7 @@ def parse_skill_request(
         return SkillRequest(
             skill=SkillMode.coerce(raw_skill),
             query=search_query,
+            keywords=_merge_keywords(keywords, payload, query),
             since=since,
             until=until,
             limit=limit,

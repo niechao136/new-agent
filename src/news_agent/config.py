@@ -155,6 +155,10 @@ class LLMSettings(BaseModel):
     max_excerpt_chars: int = 800
     #: Map-reduce summary: articles per map chunk.
     summary_chunk_size: int = 6
+    #: LLM re-ranking: how many filtered candidates are sent to the judge model.
+    rerank_max_candidates: int = 30
+    #: LLM re-ranking: max characters of the article excerpt per candidate.
+    rerank_max_excerpt_chars: int = 200
     structured_method: Literal["json_schema", "function_calling", "json_mode"] = (
         "json_schema"
     )
@@ -206,6 +210,10 @@ class Settings(BaseModel):
     dedup_title_ratio: float = 0.86
     dedup_simhash_distance: int = 3
     trends_top_n: int = 8
+    #: LLM 精排：对通过阈值过滤的候选做一次相关性重排（需要 LLM 配置）。
+    rerank_enabled: bool = True
+    #: 来源多样性：限制单一来源占据结果的比例（limit/3，至少 3 篇）。
+    source_diversity: bool = True
 
     # --- cache ------------------------------------------------------------
     cache_enabled: bool = True
@@ -295,6 +303,8 @@ class Settings(BaseModel):
                 batch_size=_env_int("LLM_BATCH_SIZE", 6),
                 max_excerpt_chars=_env_int("LLM_MAX_EXCERPT_CHARS", 800),
                 summary_chunk_size=_env_int("LLM_SUMMARY_CHUNK_SIZE", 6),
+                rerank_max_candidates=_env_int("LLM_RERANK_MAX_CANDIDATES", 30),
+                rerank_max_excerpt_chars=_env_int("LLM_RERANK_MAX_EXCERPT_CHARS", 200),
             )
 
             return cls(
@@ -318,6 +328,8 @@ class Settings(BaseModel):
                 dedup_title_ratio=_env_float("DEDUP_TITLE_RATIO", 0.86),
                 dedup_simhash_distance=_env_int("DEDUP_SIMHASH_DISTANCE", 3),
                 trends_top_n=_env_int("TRENDS_TOP_N", 8),
+                rerank_enabled=_env_bool("RERANK_ENABLED", True),
+                source_diversity=_env_bool("SOURCE_DIVERSITY", True),
                 cache_enabled=_env_bool("CACHE_ENABLED", True),
                 cache_path=_env("CACHE_PATH", ".cache/news_agent.sqlite3")
                 or ".cache/news_agent.sqlite3",

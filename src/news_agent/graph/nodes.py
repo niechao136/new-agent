@@ -25,7 +25,8 @@ from ..models import (
     SkillRequest,
     utcnow,
 )
-from ..relevance import relevance_score, select_relevant
+from ..relevance import pick_relevant, rank_articles, relevance_score
+from ..rerank import Reranker, blend_scores
 from ..runtime import Metrics, RunContext, get_logger
 from ..sources import SourceRegistry
 from ..trends import build_trends
@@ -45,6 +46,8 @@ class GraphDeps:
     cache: SqliteCache | None
     metrics: Metrics
     deduplicator: Deduplicator
+    #: Optional LLM re-ranker; ``None`` keeps the pure lexical ordering.
+    reranker: Reranker | None = None
 
 
 def get_ctx(config: RunnableConfig | None) -> RunContext:
@@ -192,8 +195,24 @@ class NewsGraphNodes:
                 if request.threshold is not None
                 else self.settings.relevance_threshold
             )
-            selected, dropped, topped_up = select_relevant(
-                deduped, request, threshold=threshold, limit=request.limit
+            # 词面打分（连续匹配约束 + 多关键词），来源权重只影响排序。
+            scored = rank_articles(
+                deduped,
+                request.query,
+                keywords=request.keywords,
+                weights=self.deps.registry.weights(),
+            )
+            scores = {article.id: score for article, score in scored}
+            # 有精排时先多取一些候选，让 LLM 有机会把临界的相关文章提到前面；
+            # 精排后再按 request.limit 截断。
+            retrieve_limit = request.limit
+            if self.deps.reranker is not None:
+                retrieve_limit = max(request.limit, self.settings.llm.rerank_max_candidates)
+            selected, _, topped_up = pick_relevant(
+                scored,
+                threshold=threshold,
+                limit=retrieve_limit,
+                per_source_cap=self._per_source_cap(retrieve_limit),
             )
             if topped_up:
                 ctx.add_warning(
@@ -201,6 +220,10 @@ class NewsGraphNodes:
                 )
             if deduped and not selected:
                 ctx.add_warning("候选文章均未通过相关度过滤")
+            selected, scores = await self._maybe_rerank(request, selected, scores, ctx)
+            if len(selected) > request.limit:
+                selected = selected[: request.limit]
+            dropped = len(scored) - len(selected)
             ctx.count("articles_selected", len(selected))
             ctx.emit(
                 "filter",
@@ -213,7 +236,65 @@ class NewsGraphNodes:
             "deduped_articles": deduped,
             "filtered_articles": selected,
             "duplicates_removed": duplicates,
+            "relevance_scores": scores,
         }
+
+    def _per_source_cap(self, limit: int) -> int | None:
+        """Max articles a single source may contribute (None = no cap)."""
+        if not self.settings.source_diversity:
+            return None
+        return max(3, -(-max(1, limit) // 3))  # ceil(limit / 3)
+
+    async def _maybe_rerank(
+        self,
+        request: SkillRequest,
+        selected: list[RawArticle],
+        scores: dict[str, float],
+        ctx: RunContext,
+    ) -> tuple[list[RawArticle], dict[str, float]]:
+        """LLM 精排：只在有候选需要取舍时调用一次，失败则保持词面顺序。"""
+        reranker = self.deps.reranker
+        if reranker is None or len(selected) < 2:
+            return selected, scores
+
+        budget = max(2, self.settings.llm.rerank_max_candidates)
+        candidates = selected[:budget]
+        with ctx.timeit("rerank"):
+            try:
+                llm_scores = await reranker.rerank(
+                    request.query, request.keywords, candidates, ctx=ctx
+                )
+            except Exception as exc:  # noqa: BLE001 - degrade to lexical ranking
+                ctx.add_warning(f"LLM 精排失败，保持词面相关性排序（{exc}）")
+                return selected, scores
+
+        if not llm_scores:
+            return selected, scores
+
+        merged = dict(scores)
+        for article in candidates:
+            if article.id in llm_scores:
+                merged[article.id] = round(
+                    blend_scores(scores.get(article.id, 0.0), llm_scores[article.id]), 4
+                )
+
+        ordered = sorted(
+            selected,
+            key=lambda article: (
+                merged.get(article.id, 0.0),
+                scores.get(article.id, 0.0),
+                article.published_at.timestamp() if article.published_at else 0.0,
+            ),
+            reverse=True,
+        )
+        ctx.count("articles_reranked", len(llm_scores))
+        ctx.emit(
+            "filter",
+            f"LLM 精排完成：对 {len(llm_scores)} 篇候选重新排序",
+            event="progress",
+            reranked=len(llm_scores),
+        )
+        return ordered, merged
 
     def route_after_filter(self, state: NewsState) -> str:
         """``fetch_news`` stops here; the other skills continue to analysis."""
@@ -251,9 +332,9 @@ class NewsGraphNodes:
                     analyzed = analyzed + await self.deps.heuristic.analyze(request, tail, ctx)
 
             # attach the relevance score computed by the filter stage
-            scores = {
-                article.id: relevance_score(article, request.query) for article in articles
-            }
+            scores = dict(state.get("relevance_scores") or {})
+            if not scores:
+                scores = {article.id: relevance_score(article, request.query) for article in articles}
             for item in analyzed:
                 item.relevance = scores.get(item.id, 0.0)
             analyzed.sort(
@@ -310,9 +391,12 @@ class NewsGraphNodes:
             if request.skill is SkillMode.FETCH and not analyzed and filtered:
                 # fetch_news skips the analyze node; still return metadata rows
                 analyzed = light_analyze(filtered)
-                scores = {
-                    article.id: relevance_score(article, request.query) for article in filtered
-                }
+                scores = dict(state.get("relevance_scores") or {})
+                if not scores:
+                    scores = {
+                        article.id: relevance_score(article, request.query)
+                        for article in filtered
+                    }
                 for item in analyzed:
                     item.relevance = scores.get(item.id, 0.0)
 

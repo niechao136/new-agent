@@ -62,6 +62,10 @@ class SourceRegistry:
     def names(self) -> list[str]:
         return list(self._sources)
 
+    def weights(self) -> dict[str, float]:
+        """Source name -> configured quality weight (used to rank results)."""
+        return {name: source.weight for name, source in self._sources.items()}
+
     def select(self, names: Iterable[str] | None = None) -> list[NewsSource]:
         if not names:
             return list(self._sources.values())

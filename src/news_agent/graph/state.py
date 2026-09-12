@@ -27,6 +27,9 @@ class NewsState(TypedDict, total=False):
     deduped_articles: list[RawArticle]
     filtered_articles: list[RawArticle]
     duplicates_removed: int
+    #: article id -> relevance score (词面分与 LLM 精排分融合后的结果)，
+    #: computed once in the filter stage and reused downstream.
+    relevance_scores: dict[str, float]
 
     # analyze_node
     analyzed_articles: list[AnalyzedArticle]

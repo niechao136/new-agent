@@ -41,6 +41,14 @@ Rules:
 - `search_query`: concise search keywords for a news search engine. Remove
   politeness/filler words (帮我、请、汇总、please、summarise...) and any time
   words; keep the topic itself, in its original language.
+- `keywords`: 2-6 extra retrieval keywords for the SAME topic, used to match
+  articles across languages and wording. Rules:
+  * always include an English translation of the topic (e.g. 固态电池 ->
+    "solid-state battery"), plus the most common alias/acronym/product name;
+  * if the request is already English, also add the dominant Chinese term;
+  * short noun phrases only, no time words, no filler words, no duplicates of
+    `search_query`;
+  * if no useful variant exists, return an empty list.
 - `time_type`: the time window expressed by the request, choose exactly one:
   "none" (no time constraint), "today", "yesterday", "this_week", "last_week",
   "this_month", "last_month", "this_year", "past_days" (the last N days),
@@ -56,6 +64,13 @@ class _LLMIntent(BaseModel):
 
     search_query: str = Field(
         description="Concise search keywords with politeness and time words removed."
+    )
+    keywords: list[str] = Field(
+        default_factory=list,
+        description=(
+            "2-6 retrieval keywords for the same topic: translation(s), aliases, "
+            "acronyms. No time words, no filler words."
+        ),
     )
     time_type: Literal[
         "none",
@@ -80,12 +95,36 @@ class _LLMIntent(BaseModel):
     )
 
 
+class QueryIntent(BaseModel):
+    """The normalised result of query intent parsing."""
+
+    search_query: str
+    keywords: list[str] = Field(default_factory=list)
+    since: datetime | None = None
+    until: datetime | None = None
+
+
 class LLMIntentError(RuntimeError):
     """Raised when the LLM could not produce a usable intent."""
 
 
 def _midnight(now: datetime) -> datetime:
     return now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _clean_keywords(values: list[str] | None, *, exclude: str) -> list[str]:
+    """Normalise LLM keywords: strip, drop empties/duplicates/echoes of the query."""
+    cleaned: list[str] = []
+    excluded = {exclude.strip().lower()}
+    for raw in values or []:
+        item = str(raw).strip()
+        if not item or len(item) > 64:
+            continue
+        if item.lower() in excluded:
+            continue
+        if item not in cleaned:
+            cleaned.append(item)
+    return cleaned[:8]
 
 
 def _parse_iso_date(value: str, now: datetime) -> datetime | None:
@@ -170,10 +209,8 @@ class LLMIntentParser:
         return self._get_llm().with_structured_output(_LLMIntent, include_raw=True)
 
     # ------------------------------------------------------------------
-    async def parse(
-        self, query: str, *, now: datetime | None = None
-    ) -> tuple[datetime | None, datetime | None, str]:
-        """Parse ``query`` into ``(since, until, cleaned_query)`` via the LLM."""
+    async def parse(self, query: str, *, now: datetime | None = None) -> QueryIntent:
+        """Parse ``query`` into a :class:`QueryIntent` via the LLM."""
         now = now or utcnow()
         prompt = INTENT_PROMPT.format(now=now.isoformat(), query=query)
         messages = [("system", INTENT_SYSTEM_PROMPT), ("human", prompt)]
@@ -181,7 +218,12 @@ class LLMIntentParser:
         since, until, cleaned = intent_to_window(intent, now=now)
         if not cleaned:
             cleaned = query.strip()
-        return since, until, cleaned
+        return QueryIntent(
+            search_query=cleaned,
+            keywords=_clean_keywords(intent.keywords, exclude=cleaned),
+            since=since,
+            until=until,
+        )
 
     async def _invoke(self, messages: Any) -> _LLMIntent:
         error: Exception | None = None
@@ -224,25 +266,28 @@ async def parse_query_intent(
     llm_settings: LLMSettings,
     *,
     now: datetime | None = None,
-) -> tuple[datetime | None, datetime | None, str]:
+) -> QueryIntent:
     """Best-effort intent parsing: LLM when available, regex otherwise.
 
-    @returns (since, until, cleaned_query)，语义与 :func:`parse_time_window`
-             完全一致，可直接替换使用。
+    @returns 一个 :class:`QueryIntent`；LLM 未配置或失败时，时间窗口回退到
+             :func:`parse_time_window` 的正则解析，``keywords`` 为空列表。
     """
     if not llm_settings.configured:
-        return parse_time_window(query, now=now)
+        since, until, cleaned = parse_time_window(query, now=now)
+        return QueryIntent(search_query=cleaned, since=since, until=until)
     try:
         parser = LLMIntentParser(llm_settings)
         return await parser.parse(query, now=now)
     except Exception as exc:  # noqa: BLE001 - degrade to the regex parser
         log.warning("LLM intent parsing failed (%r), falling back to regex", exc)
-        return parse_time_window(query, now=now)
+        since, until, cleaned = parse_time_window(query, now=now)
+        return QueryIntent(search_query=cleaned, since=since, until=until)
 
 
 __all__ = [
     "LLMIntentError",
     "LLMIntentParser",
+    "QueryIntent",
     "intent_to_window",
     "parse_query_intent",
 ]

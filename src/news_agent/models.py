@@ -8,6 +8,7 @@ The models double as the *contract* advertised in the A2A agent card: the
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Literal
@@ -199,6 +200,9 @@ class SkillRequest(BaseModel):
 
     skill: SkillMode = SkillMode.SUMMARIZE
     query: str
+    #: 查询的扩展关键词（同义词/别名/多语言，通常由 LLM 意图解析产出）。
+    #: 仅用于相关性匹配，不改变抓取请求，因此不影响 cache_key。
+    keywords: list[str] = Field(default_factory=list)
     since: datetime | None = None
     until: datetime | None = None
     limit: int = 15
@@ -207,6 +211,25 @@ class SkillRequest(BaseModel):
     threshold: float | None = None
     include_analyzed: bool = True
     context_id: str | None = None
+
+    @field_validator("keywords", mode="before")
+    @classmethod
+    def _clean_keywords(cls, value: Any) -> Any:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            items: list[Any] = [part.strip() for part in re.split(r"[,，;；\s]+", value)]
+        elif isinstance(value, (list, tuple, set)):
+            items = [str(item).strip() for item in value]
+        else:
+            return []
+        cleaned: list[str] = []
+        for item in items:
+            if not item or len(item) > 64:
+                continue
+            if item not in cleaned:
+                cleaned.append(item)
+        return cleaned[:8]
 
     @field_validator("since", "until", mode="before")
     @classmethod

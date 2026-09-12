@@ -10,6 +10,7 @@ from ..cache import SqliteCache
 from ..config import Settings, load_settings
 from ..dedup import Deduplicator
 from ..models import ErrorCode, NewsResult, SkillMode, SkillRequest, utcnow
+from ..rerank import Reranker, build_reranker
 from ..runtime import Metrics, RunContext, configure_logging, get_logger
 from ..sources import SourceRegistry
 from .builder import build_news_graph
@@ -29,6 +30,7 @@ class NewsAgent:
         cache: SqliteCache | None,
         metrics: Metrics | None = None,
         analyzer: Analyzer | None = None,
+        reranker: Reranker | None = None,
     ) -> None:
         self.settings = settings
         self.registry = registry
@@ -36,6 +38,9 @@ class NewsAgent:
         self.metrics = metrics or Metrics()
         self.heuristic = HeuristicAnalyzer()
         self.analyzer: Analyzer = analyzer or build_analyzer(settings)
+        self.reranker: Reranker | None = (
+            reranker if reranker is not None else build_reranker(settings)
+        )
         self.deduplicator = Deduplicator(
             title_ratio=settings.dedup_title_ratio,
             simhash_distance=settings.dedup_simhash_distance,
@@ -49,6 +54,7 @@ class NewsAgent:
                 cache=cache,
                 metrics=self.metrics,
                 deduplicator=self.deduplicator,
+                reranker=self.reranker,
             )
         )
         self.graph = build_news_graph(self.nodes)
@@ -62,6 +68,7 @@ class NewsAgent:
         registry: SourceRegistry | None = None,
         cache: SqliteCache | None = None,
         analyzer: Analyzer | None = None,
+        reranker: Reranker | None = None,
         metrics: Metrics | None = None,
     ) -> "NewsAgent":
         settings = settings or load_settings()
@@ -80,6 +87,7 @@ class NewsAgent:
             cache=cache,
             metrics=metrics,
             analyzer=analyzer,
+            reranker=reranker,
         )
 
     # ------------------------------------------------------------------

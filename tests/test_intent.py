@@ -1,6 +1,6 @@
 """LLM 意图解析（intent）测试。"""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -9,6 +9,7 @@ from news_agent.config import LLMSettings, Settings
 from news_agent.intent import (
     LLMIntentError,
     LLMIntentParser,
+    QueryIntent,
     _LLMIntent,
     intent_to_window,
     parse_query_intent,
@@ -99,18 +100,28 @@ def test_none_type_no_window():
 # LLMIntentParser
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_parser_returns_llm_window():
-    parser = _parser_with(_LLMIntent(search_query="科技新闻", time_type="today"))
-    since, _, cleaned = await parser.parse("帮我汇总一下今天的科技新闻", now=NOW)
-    assert since == datetime(2026, 9, 12, tzinfo=timezone.utc)
-    assert cleaned == "科技新闻"
+async def test_parser_returns_intent_with_keywords():
+    parser = _parser_with(
+        _LLMIntent(
+            search_query="固态电池",
+            keywords=["solid-state battery", "全固态电池", "固态电池"],
+            time_type="today",
+        )
+    )
+    intent = await parser.parse("帮我汇总一下今天的固态电池新闻", now=NOW)
+
+    assert isinstance(intent, QueryIntent)
+    assert intent.search_query == "固态电池"
+    assert intent.since == datetime(2026, 9, 12, tzinfo=timezone.utc)
+    # 与 search_query 重复的关键词被剔除
+    assert intent.keywords == ["solid-state battery", "全固态电池"]
 
 
 @pytest.mark.asyncio
 async def test_parser_empty_query_falls_back_to_raw():
     parser = _parser_with(_LLMIntent(search_query="  ", time_type="none"))
-    _, _, cleaned = await parser.parse("科技新闻", now=NOW)
-    assert cleaned == "科技新闻"
+    intent = await parser.parse("科技新闻", now=NOW)
+    assert intent.search_query == "科技新闻"
 
 
 @pytest.mark.asyncio
@@ -125,36 +136,38 @@ async def test_parser_raises_on_llm_error():
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_unconfigured_settings_uses_regex():
-    since, _, cleaned = await parse_query_intent(
+    intent = await parse_query_intent(
         "帮我汇总一下本周的科技新闻", LLMSettings(enabled=False), now=NOW
     )
-    assert since == datetime(2026, 9, 7, tzinfo=timezone.utc)  # 本周一
-    assert cleaned == "科技新闻"
+    assert intent.since == datetime(2026, 9, 7, tzinfo=timezone.utc)  # 本周一
+    assert intent.search_query == "科技新闻"
+    assert intent.keywords == []
 
 
 @pytest.mark.asyncio
 async def test_llm_failure_falls_back_to_regex():
     llm = LLMSettings(base_url="http://localhost:8000/v1", api_key="test", max_retries=0)
-    since, _, cleaned = await parse_query_intent(
-        "帮我汇总一下本周的科技新闻", llm, now=NOW
-    )
-    assert since == datetime(2026, 9, 7, tzinfo=timezone.utc)
-    assert cleaned == "科技新闻"
+    intent = await parse_query_intent("帮我汇总一下本周的科技新闻", llm, now=NOW)
+    assert intent.since == datetime(2026, 9, 7, tzinfo=timezone.utc)
+    assert intent.search_query == "科技新闻"
 
 
 @pytest.mark.asyncio
 async def test_llm_success_path(monkeypatch):
     llm = LLMSettings(base_url="http://localhost:8000/v1", api_key="test")
 
-    async def _fake_parse(query, *, now=None):
-        return NOW - __import__("datetime").timedelta(days=2), None, "固态电池"
+    async def _fake_parse(self, query, *, now=None):
+        return QueryIntent(
+            search_query="固态电池",
+            keywords=["solid-state battery"],
+            since=NOW - timedelta(days=2),
+        )
 
-    monkeypatch.setattr(
-        "news_agent.intent.LLMIntentParser.parse", lambda self, q, now=None: _fake_parse(q, now=now)
-    )
-    since, _, cleaned = await parse_query_intent("最近两天的固态电池新闻", llm, now=NOW)
-    assert cleaned == "固态电池"
-    assert (NOW - since).days == 2
+    monkeypatch.setattr("news_agent.intent.LLMIntentParser.parse", _fake_parse)
+    intent = await parse_query_intent("最近两天的固态电池新闻", llm, now=NOW)
+    assert intent.search_query == "固态电池"
+    assert intent.keywords == ["solid-state battery"]
+    assert (NOW - intent.since).days == 2
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +176,11 @@ async def test_llm_success_path(monkeypatch):
 @pytest.mark.asyncio
 async def test_aparse_uses_intent_parser(monkeypatch):
     async def _fake_intent(query, llm_settings, *, now=None):
-        return datetime(2026, 9, 7, tzinfo=timezone.utc), None, "科技新闻"
+        return QueryIntent(
+            search_query="科技新闻",
+            keywords=["tech news", "technology"],
+            since=datetime(2026, 9, 7, tzinfo=timezone.utc),
+        )
 
     monkeypatch.setattr("news_agent.a2a.executor.parse_query_intent", _fake_intent)
     request = await aparse_skill_request(
@@ -172,6 +189,20 @@ async def test_aparse_uses_intent_parser(monkeypatch):
     )
     assert request.query == "科技新闻"
     assert request.since == datetime(2026, 9, 7, tzinfo=timezone.utc)
+    assert request.keywords == ["tech news", "technology"]
+
+
+@pytest.mark.asyncio
+async def test_aparse_merges_caller_keywords(monkeypatch):
+    async def _fake_intent(query, llm_settings, *, now=None):
+        return QueryIntent(search_query=query, keywords=["solid-state battery"])
+
+    monkeypatch.setattr("news_agent.a2a.executor.parse_query_intent", _fake_intent)
+    request = await aparse_skill_request(
+        data={"query": "固态电池", "keywords": ["固态电池", "全固态电池", "solid-state battery"]},
+        settings=_settings(),
+    )
+    assert request.keywords == ["solid-state battery", "全固态电池"]
 
 
 @pytest.mark.asyncio
