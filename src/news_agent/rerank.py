@@ -50,6 +50,10 @@ For every candidate return `index` and `relevance` in [0, 1]:
 Rules:
 - echo the exact `index` of each candidate, do not invent indices
 - judge against the query topic, not against the language of the candidate
+- score 0.0 for gambling/betting promotion, SEO spam, affiliate or download
+  landing pages, and content farms - even if their title repeats the query
+  keywords verbatim (this is a common trick to rank for every query)
+- score 0.0 when the title only echoes the query without any real content
 - do not add any text outside the JSON structure
 """
 

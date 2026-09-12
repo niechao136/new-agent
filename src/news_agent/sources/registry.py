@@ -66,6 +66,14 @@ class SourceRegistry:
         """Source name -> configured quality weight (used to rank results)."""
         return {name: source.weight for name, source in self._sources.items()}
 
+    def topics(self) -> dict[str, str]:
+        """Source name -> 栏目领域（tech/business/...），搜索类源不在其中。"""
+        return {
+            name: source.topic
+            for name, source in self._sources.items()
+            if getattr(source, "topic", None)
+        }
+
     def select(self, names: Iterable[str] | None = None) -> list[NewsSource]:
         if not names:
             return list(self._sources.values())

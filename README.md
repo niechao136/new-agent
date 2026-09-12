@@ -17,15 +17,17 @@
 | 标准协议实现 | Agent Card、任务生命周期、JSON-RPC 1.0 + 0.3 兼容、HTTP+JSON REST、SSE 订阅全部来自 `a2a-sdk` |
 | 异步任务模型 | `submitted → working → completed / failed / canceled / rejected`，支持轮询、订阅、取消、列表 |
 | 阶段进度推送 | 标准 `TaskStatusUpdateEvent` 携带 `{stage, kind, data}` 元数据（fetch/filter/analyze/summarize/format） |
-| 多源抓取 | RSS（Google News / Bing News，免 key）、NewsAPI、GNews、内置 mock 源 |
+| 多源抓取 | RSS（Google News / Bing News 搜索 + 23 个免 key 栏目源，覆盖科技/财经/国际/体育/娱乐/健康）、NewsAPI、GNews、内置 mock 源 |
 | 统一源抽象 | `NewsSource.fetch(query, since, limit)`，新增源只需实现 `_fetch` |
+| 质量过滤 | 剔除博彩/SEO 站群/促销页（品牌词 + 语义词累计 + 域名特征），避免"标题复述查询词"的垃圾页挤占结果 |
 | 三重去重 | URL 规范化 → 标题规范化 → SimHash/标题相似度模糊匹配 |
 | 相关性过滤 | 可解释的 token 重叠打分 + 连续匹配约束（抑制 CJK 跨界 bigram 误召回）+ 多语言关键词匹配（中英互查）；来源权重排序 + 来源配额去偏 |
+| 泛化查询路由 | 「科技新闻」这类无具体对象的查询按来源栏目领域匹配（并给基础分），避免只有中文源能召回、英文源全被丢弃 |
 | 可选 LLM 精排 | 对通过阈值的候选做一次结构化相关性重排，分数融合进排序；失败自动退回词面排序 |
 | 结构化抽取 | LLM structured output（OpenAI 兼容 / vLLM），分 batch + 并发上限 |
 | 长文本处理 | map-reduce 摘要，避免超长 prompt；分批小结失败可退化为拼接 |
 | 双缓存 | SQLite 抓取缓存（TTL）+ 结果缓存 + 文章历史（增量识别新文章） |
-| 稳定降级 | 源不可用/超时/LLM 失败/任务超时都返回**部分结果 + 结构化错误码**，绝不静默 |
+| 稳定降级 | 源不可用/超时/LLM 失败/任务超时都返回**部分结果 + 结构化错误码**，绝不静默；`degraded` 只在结果真的受影响（无结果、多数源失败、LLM 降级）时置位，少数源失败仅告警 |
 | 可观测性 | 每节点耗时、抓取成功率、LLM token 数、`/metrics` 指标快照 |
 | 离线可跑 | 不配置任何 key（甚至无网络）也能用 mock 源 + 启发式分析完整跑通 |
 | 容器化部署 | 多阶段 `Dockerfile`（依赖锁文件安装、非 root、内置健康检查）+ `docker-compose.yml` |
@@ -41,8 +43,9 @@ src/news_agent/
   text_utils.py       # CJK 感知分词、URL 规范化、HTML 清洗
   runtime.py          # Metrics + RunContext（进度事件 / 阶段耗时 / 部分结果）
   dedup.py            # 去重（URL / 标题 / SimHash）
+  quality.py          # 内容质量过滤（博彩/SEO 站群/促销页）
   intent.py           # 查询意图解析（主题关键词 + 时间窗口，LLM 优先 / 正则回退）
-  relevance.py        # 相关性打分与筛选
+  relevance.py        # 相关性打分、栏目路由与筛选
   rerank.py           # 可选 LLM 精排（与词面分融合）
   trends.py           # 话题级趋势聚合
   cache.py            # SQLite 缓存 + 增量文章历史
@@ -233,11 +236,13 @@ python -m news_agent.cli call "固态电池" --base-url http://localhost:9901
 | `DEFAULT_LANGUAGE` / `DEFAULT_LIMIT` / `MAX_LIMIT` | zh / 15 / 50 | 请求默认值与上限 |
 | `DEFAULT_MODE` | summarize_news | 未显式指定 skill 时的默认技能 |
 | `TASK_TIMEOUT_S` | 180 | 单任务最大执行时间（超时返回部分结果） |
-| `FETCH_TIMEOUT_S` | 20 | 单个源单次请求超时 |
-| `SOURCE_CONCURRENCY` | 4 | 并发源数量上限 |
+| `FETCH_TIMEOUT_S` | 15 | 单个源单次请求超时 |
+| `SOURCE_CONCURRENCY` | 8 | 并发源数量上限（源较多时决定抓取总耗时） |
 | `RELEVANCE_THRESHOLD` | 0.2 | 相关性阈值 |
 | `RERANK_ENABLED` | 1 | 是否启用 LLM 精排（需配置 LLM，否则自动跳过） |
 | `SOURCE_DIVERSITY` | 1 | 是否限制单一来源占比（上限 `ceil(limit/3)`，至少 3 篇） |
+| `SPAM_FILTER_ENABLED` / `SPAM_THRESHOLD` | 1 / 0.6 | 垃圾内容（博彩/SEO 站群/促销页）过滤开关与阈值 |
+| `TOPIC_FEEDS` | 1 | 是否启用 23 个免 key 栏目源（关闭后只剩搜索类源） |
 | `MAX_ARTICLES_FOR_LLM` | 20 | 送 LLM 的文章上限，超出部分走启发式 |
 | `LLM_RERANK_MAX_CANDIDATES` / `LLM_RERANK_MAX_EXCERPT_CHARS` | 30 / 200 | 精排候选数与每篇摘要字符上限 |
 | `CACHE_ENABLED` / `CACHE_PATH` / `CACHE_TTL_S` | 1 / .cache/news_agent.sqlite3 / 900 | 抓取缓存 |
@@ -433,7 +438,7 @@ START ─▶ fetch ─▶ filter ─┬─▶ (skill = fetch_news / 无结果) �
 | 节点 | 职责 |
 | --- | --- |
 | `fetch_node` | 并发调用多个 `NewsSource`（`asyncio.gather` + 并发上限 + 每源超时 + tenacity 重试）；命中缓存则跳过抓取；写入增量历史 |
-| `filter_node` | 三重去重 → 相关性打分（连续匹配约束 + 多关键词）→ 来源权重排序 → 来源配额去偏 → 阈值过滤 → 数量截断（低于阈值时按 best-effort 补齐并告警）→ 可选 LLM 精排；分数写入 state 供下游复用 |
+| `filter_node` | 质量过滤（博彩/SEO 站群/促销页）→ 三重去重 → 相关性打分（连续匹配约束 + 多关键词 + 泛化查询栏目路由）→ 来源权重排序 → 来源配额去偏 → 阈值过滤 → 数量截断（低于阈值时按 best-effort 补齐并告警）→ 可选 LLM 精排；分数写入 state 供下游复用 |
 | `analyze_node` | 分批 + 并发受限的 LLM structured output（实体/事件/情感/立场/要点/摘要）；超预算与失败批次用启发式补齐 |
 | `summarize_node` | map-reduce：分批小结 → 合并综述（避免一次性塞进 context） |
 | `format_node` | 组装 `NewsResult`（含 trends、counts、timings、metrics），写入 `RunContext.partial` |

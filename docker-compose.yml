@@ -43,9 +43,11 @@ services:
       NEWS_AGENT_GNEWS_KEY: ${NEWS_AGENT_GNEWS_KEY:-}
       NEWS_AGENT_EXTRA_RSS_FEEDS: ${NEWS_AGENT_EXTRA_RSS_FEEDS:-}
       NEWS_AGENT_RELEVANCE_THRESHOLD: ${NEWS_AGENT_RELEVANCE_THRESHOLD:-0.2}
-      # filtering: LLM 精排 + 来源多样性（0 可关闭）
+      # filtering: LLM 精排 + 来源多样性 + 垃圾内容过滤（0 可关闭）
       NEWS_AGENT_RERANK_ENABLED: ${NEWS_AGENT_RERANK_ENABLED:-1}
       NEWS_AGENT_SOURCE_DIVERSITY: ${NEWS_AGENT_SOURCE_DIVERSITY:-1}
+      NEWS_AGENT_SPAM_FILTER_ENABLED: ${NEWS_AGENT_SPAM_FILTER_ENABLED:-1}
+      NEWS_AGENT_SPAM_THRESHOLD: ${NEWS_AGENT_SPAM_THRESHOLD:-0.6}
     volumes:
       # SQLite cache + article history; keeps warm data across restarts
       - news-agent-data:/data

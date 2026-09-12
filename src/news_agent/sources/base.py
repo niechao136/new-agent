@@ -52,6 +52,7 @@ class NewsSource(abc.ABC):
         self.http = http
         self.name = config.name
         self.weight = config.weight
+        self.topic = config.topic
         self.last_errors: list[ErrorInfo] = []
         self.max_attempts = 3
         self._timeout = config.timeout_s or settings.fetch_timeout_s

@@ -33,36 +33,46 @@ BING_NEWS_RSS = "https://www.bing.com/news/search?q={query}&format=RSS&setlang={
 
 #: 零配置主题 RSS 源（无需 API key）。它们不是关键词搜索，而是固定栏目流：
 #: 抓回后由相关性过滤按查询取舍，作为 Google/Bing 搜索之外的补充。
-#: 覆盖国内科技、国外综合媒体以及财经/体育/娱乐/健康等多个行业。
-TOPIC_RSS_FEEDS: dict[str, str] = {
+#: 值为 ``(feed_url, topic)``；``topic`` 用于「泛化查询」按栏目路由
+#: （见 ``news_agent.relevance``），因此每个源必须归类。
+#: 所有 URL 都已用 ``curl`` 在生产环境验证过（返回条目数 > 0）。
+TOPIC_RSS_FEEDS: dict[str, tuple[str, str]] = {
     # --- 国内科技 ---
-    "36kr": "https://36kr.com/feed",
-    "huxiu": "https://www.huxiu.com/rss/0.xml",
-    "sspai": "https://sspai.com/feed",
-    "solidot": "https://www.solidot.org/index.rss",
+    "sspai": ("https://sspai.com/feed", "tech"),
+    "solidot": ("https://www.solidot.org/index.rss", "tech"),
+    "ithome": ("https://www.ithome.com/rss/", "tech"),
+    "ifanr": ("https://www.ifanr.com/feed", "tech"),
     # --- 国外科技 ---
-    "techcrunch": "https://techcrunch.com/feed/",
-    "the-verge": "https://www.theverge.com/rss/index.xml",
-    "bbc-tech": "https://feeds.bbci.co.uk/news/technology/rss.xml",
-    # --- 国外综合媒体 ---
-    "bbc-world": "https://feeds.bbci.co.uk/news/world/rss.xml",
-    "aljazeera": "https://www.aljazeera.com/xml/rss/all.xml",
-    "npr": "https://feeds.npr.org/1001/rss.xml",
-    "dw": "https://rss.dw.com/rdf/rss-en-all",
-    "france24": "https://www.france24.com/en/rss",
-    "cna": "https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml",
-    "nikkei-asia": "https://asia.nikkei.com/rss/feed/nanex",
+    "techcrunch": ("https://techcrunch.com/feed/", "tech"),
+    "the-verge": ("https://www.theverge.com/rss/index.xml", "tech"),
+    "bbc-tech": ("https://feeds.bbci.co.uk/news/technology/rss.xml", "tech"),
+    # --- 国际综合 ---
+    "bbc-world": ("https://feeds.bbci.co.uk/news/world/rss.xml", "world"),
+    "aljazeera": ("https://www.aljazeera.com/xml/rss/all.xml", "world"),
+    "npr": ("https://feeds.npr.org/1001/rss.xml", "world"),
+    "dw": ("https://rss.dw.com/rdf/rss-en-all", "world"),
+    "france24": ("https://www.france24.com/en/rss", "world"),
+    "cna": ("https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml", "world"),
+    "japantimes": ("https://www.japantimes.co.jp/feed/", "world"),
     # --- 财经/商业 ---
-    "cnbc-economy": (
-        "https://search.cnbc.com/rs/search/combinedcms/view.xml"
-        "?partnerId=wrss25&id=20910258"
+    "cnbc-top": ("https://www.cnbc.com/id/100003114/device/rss/rss.html", "business"),
+    "marketwatch": (
+        "https://feeds.content.dowjones.io/public/rss/mw_topstories",
+        "business",
     ),
-    "marketwatch": "https://feeds.content.dowjones.io/public/rss/mw_topstories",
-    "economist-finance": "https://www.economist.com/finance-and-economics/rss.xml",
-    # --- 其他行业 ---
-    "espn-sports": "https://www.espn.com/espn/rss/news",
-    "variety-entertainment": "https://variety.com/feed/",
-    "stat-health": "https://www.statnews.com/feed/",
+    "wsj-markets": ("https://feeds.a.dj.com/rss/RSSMarketsMain.xml", "business"),
+    "economist-finance": (
+        "https://www.economist.com/finance-and-economics/rss.xml",
+        "business",
+    ),
+    # --- 体育 ---
+    "bbc-sport": ("https://feeds.bbci.co.uk/sport/rss.xml", "sports"),
+    "skysports": ("https://www.skysports.com/rss/12040", "sports"),
+    # --- 娱乐 ---
+    "variety": ("https://variety.com/feed/", "entertainment"),
+    "deadline": ("https://deadline.com/feed/", "entertainment"),
+    # --- 健康 ---
+    "stat-health": ("https://www.statnews.com/feed/", "health"),
 }
 
 
@@ -128,6 +138,9 @@ class SourceConfig(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
     timeout_s: float | None = None
+    #: 栏目领域（tech/business/world/sports/entertainment/health）。搜索类源
+    #: （Google/Bing/NewsAPI）没有固定领域，保持 None。
+    topic: str | None = None
 
     @field_validator("feeds", mode="before")
     @classmethod
@@ -200,8 +213,8 @@ class Settings(BaseModel):
 
     # --- reliability ------------------------------------------------------
     task_timeout_s: float = 180.0
-    fetch_timeout_s: float = 20.0
-    source_concurrency: int = 4
+    fetch_timeout_s: float = 15.0
+    source_concurrency: int = 8
     fetch_per_source_multiplier: float = 2.0
     max_articles_for_llm: int = 20
 
@@ -214,6 +227,9 @@ class Settings(BaseModel):
     rerank_enabled: bool = True
     #: 来源多样性：限制单一来源占据结果的比例（limit/3，至少 3 篇）。
     source_diversity: bool = True
+    #: 垃圾内容（博彩/SEO 站群/促销页）过滤开关与判定阈值。
+    spam_filter_enabled: bool = True
+    spam_threshold: float = 0.6
 
     # --- cache ------------------------------------------------------------
     cache_enabled: bool = True
@@ -240,12 +256,13 @@ class Settings(BaseModel):
             SourceConfig(name="bing-news", type="rss", feeds=[BING_NEWS_RSS], weight=0.8),
         ]
         if _env_bool("TOPIC_FEEDS", True):
-            for topic_name, topic_feed in TOPIC_RSS_FEEDS.items():
+            for topic_name, (topic_feed, domain) in TOPIC_RSS_FEEDS.items():
                 sources.append(
                     SourceConfig(
                         name=topic_name,
                         type="rss",
                         feeds=[topic_feed],
+                        topic=domain,
                         weight=0.6,
                     )
                 )
@@ -320,8 +337,8 @@ class Settings(BaseModel):
                 default_mode=_env("DEFAULT_MODE", "summarize_news") or "summarize_news",
                 default_window_days=_env_int("DEFAULT_WINDOW_DAYS", 7),
                 task_timeout_s=_env_float("TASK_TIMEOUT_S", 180.0),
-                fetch_timeout_s=_env_float("FETCH_TIMEOUT_S", 20.0),
-                source_concurrency=_env_int("SOURCE_CONCURRENCY", 4),
+                fetch_timeout_s=_env_float("FETCH_TIMEOUT_S", 15.0),
+                source_concurrency=_env_int("SOURCE_CONCURRENCY", 8),
                 fetch_per_source_multiplier=_env_float("FETCH_PER_SOURCE_MULTIPLIER", 2.0),
                 max_articles_for_llm=_env_int("MAX_ARTICLES_FOR_LLM", 20),
                 relevance_threshold=_env_float("RELEVANCE_THRESHOLD", 0.2),
@@ -330,6 +347,8 @@ class Settings(BaseModel):
                 trends_top_n=_env_int("TRENDS_TOP_N", 8),
                 rerank_enabled=_env_bool("RERANK_ENABLED", True),
                 source_diversity=_env_bool("SOURCE_DIVERSITY", True),
+                spam_filter_enabled=_env_bool("SPAM_FILTER_ENABLED", True),
+                spam_threshold=_env_float("SPAM_THRESHOLD", 0.6),
                 cache_enabled=_env_bool("CACHE_ENABLED", True),
                 cache_path=_env("CACHE_PATH", ".cache/news_agent.sqlite3")
                 or ".cache/news_agent.sqlite3",

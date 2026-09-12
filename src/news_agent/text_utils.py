@@ -8,6 +8,7 @@ latin text is split on word boundaries and stop-word filtered.
 from __future__ import annotations
 
 import html
+import json
 import re
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -17,6 +18,8 @@ _WS_RE = re.compile(r"\s+")
 _CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+")
 _LATIN_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9'’\-]*")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？!?；;\.])\s*|\n+")
+_CODE_FENCE_RE = re.compile(r"^\s*```[a-zA-Z0-9_-]*\s*(.*?)\s*```\s*$", re.DOTALL)
+_TEXT_WRAPPER_KEYS = ("synthesis", "summary", "text", "content", "result", "answer", "output")
 
 _TRACKING_PREFIXES = ("utm_", "spm", "from", "ref", "referrer", "cmpid", "ncid", "fbclid", "gclid")
 
@@ -50,6 +53,47 @@ def clean_text(text: str | None) -> str:
     if not text:
         return ""
     return _WS_RE.sub(" ", str(text)).strip()
+
+
+def clean_llm_text(text: str | None) -> str:
+    """Normalise raw LLM prose: strip code fences and unwrap JSON envelopes.
+
+    线上真实案例：摘要请求返回了
+
+        ```json
+        {"synthesis": "近期科技新闻涵盖了……"}
+        ```
+
+    直接展示给调用方就成了原始 JSON，因此这里统一解包。
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    fenced = _CODE_FENCE_RE.match(raw)
+    if fenced:
+        raw = fenced.group(1).strip()
+    if raw.startswith("{"):
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            return raw
+        if isinstance(parsed, dict):
+            for key in _TEXT_WRAPPER_KEYS:
+                value = parsed.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            parts = [
+                value.strip()
+                for value in parsed.values()
+                if isinstance(value, str) and value.strip()
+            ]
+            if parts:
+                return "\n".join(parts)
+        elif isinstance(parsed, list):
+            parts = [str(value).strip() for value in parsed if str(value).strip()]
+            if parts:
+                return "\n".join(parts)
+    return raw
 
 
 def truncate(text: str | None, limit: int, suffix: str = "…") -> str:

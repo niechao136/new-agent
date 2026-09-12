@@ -22,11 +22,14 @@ class NewsState(TypedDict, total=False):
 
     # fetch_node
     raw_articles: list[RawArticle]
+    #: 本次尝试抓取的源数量（用于判断"少量源失败"是否需要整体降级）
+    sources_attempted: int
 
     # filter_node
     deduped_articles: list[RawArticle]
     filtered_articles: list[RawArticle]
     duplicates_removed: int
+    spam_removed: int
     #: article id -> relevance score (词面分与 LLM 精排分融合后的结果)，
     #: computed once in the filter stage and reused downstream.
     relevance_scores: dict[str, float]

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from news_agent.models import SkillMode, SkillRequest
+from news_agent.models import ErrorCode, SkillMode, SkillRequest
+from news_agent.runtime import RunContext
 
 
 @pytest.mark.asyncio
@@ -79,3 +80,162 @@ async def test_per_source_cap_is_ceil_third(agent):
     assert agent.nodes._per_source_cap(9) == 3  # noqa: SLF001
     assert agent.nodes._per_source_cap(10) == 4  # noqa: SLF001
     assert agent.nodes._per_source_cap(1) == 3  # noqa: SLF001
+
+
+# ---------------------------------------------------------------------------
+# 垃圾内容过滤
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_filter_node_removes_gambling_spam(agent, article_factory):
+    good = article_factory("人形机器人产业观察")
+    spam = article_factory(
+        "正规买球万博APP科技新闻摘要合集", summary="提供下注与投注参考。"
+    )
+    state = {
+        "request": SkillRequest(query="人形机器人", limit=5),
+        "raw_articles": [good, spam],
+    }
+    out = await agent.nodes.filter_node(state, {"configurable": {}})
+
+    assert out["spam_removed"] == 1
+    assert [article.id for article in out["filtered_articles"]] == [good.id]
+
+
+@pytest.mark.asyncio
+async def test_spam_filter_can_be_disabled(monkeypatch, article_factory):
+    from news_agent.config import LLMSettings, Settings
+
+    from news_agent.graph.agent import NewsAgent
+
+    settings = Settings(
+        sources=[],
+        llm=LLMSettings(enabled=False),
+        cache_enabled=False,
+        log_level="WARNING",
+        spam_filter_enabled=False,
+        relevance_threshold=0.0,
+    )
+    instance = await NewsAgent.create(settings)
+    try:
+        spam = article_factory("正规买球万博APP科技新闻摘要合集", summary="提供下注与投注参考。")
+        state = {
+            "request": SkillRequest(query="科技新闻", limit=5),
+            "raw_articles": [spam],
+        }
+        out = await instance.nodes.filter_node(state, {"configurable": {}})
+        assert out["spam_removed"] == 0
+    finally:
+        await instance.aclose()
+
+
+# ---------------------------------------------------------------------------
+# 线上真实场景回归：查询「科技新闻」
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_reported_broad_query_scenario(agent, article_factory):
+    """复现线上「科技新闻」的结果：赌博 SEO 页必须被剔除，英文科技源要能入选。"""
+    gambling_1 = article_factory(
+        "科技新闻简报：m88JDB电子引领体育数字化革新- 体坛网",
+        summary="文章简报报道了m88JDB电子引领体育数字化革新的相关科技新闻。",
+        source="体坛加",
+    )
+    gambling_2 = article_factory(
+        "正规买球万博APP科技新闻摘要合集：AI革新、融资合作与全球扩张",
+        source="体坛加",
+    )
+    legit = article_factory(
+        "AI赋能历史经典产业 给千年技艺插上科技翅膀", source="新华网"
+    )
+    english_tech = article_factory(
+        "Apple unveils new MacBook lineup", source="techcrunch"
+    )
+
+    agent.registry.topics = lambda: {"techcrunch": "tech"}  # type: ignore[method-assign]
+    agent.registry.weights = lambda: {}  # type: ignore[method-assign]
+    state = {
+        "request": SkillRequest(query="科技新闻", limit=10),
+        "raw_articles": [gambling_1, gambling_2, legit, english_tech],
+    }
+    out = await agent.nodes.filter_node(state, {"configurable": {}})
+
+    assert out["spam_removed"] == 2
+    kept = {article.source for article in out["filtered_articles"]}
+    assert "体坛加" not in kept
+    assert "新华网" in kept
+    assert "techcrunch" in kept
+
+
+# ---------------------------------------------------------------------------
+# 泛化查询的栏目路由（节点级）
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_filter_node_routes_broad_query_by_topic(agent, article_factory):
+    english_tech = article_factory(
+        "Apple unveils new MacBook lineup", source="techcrunch"
+    )
+    english_sport = article_factory(
+        "United win derby in stoppage time", source="bbc-sport"
+    )
+    agent.registry.topics = lambda: {  # type: ignore[method-assign]
+        "techcrunch": "tech",
+        "bbc-sport": "sports",
+    }
+    agent.registry.weights = lambda: {}  # type: ignore[method-assign]
+    state = {
+        "request": SkillRequest(query="科技新闻", limit=5),
+        "raw_articles": [english_tech, english_sport],
+    }
+    out = await agent.nodes.filter_node(state, {"configurable": {}})
+
+    assert [article.source for article in out["filtered_articles"]] == ["techcrunch"]
+
+
+# ---------------------------------------------------------------------------
+# 降级语义：只有结果真的受影响才算降级
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_minor_source_failures_do_not_degrade(agent, article_factory):
+    article = article_factory("人形机器人产业观察")
+    ctx = RunContext()
+    ctx.add_error(ErrorCode.SOURCE_UNAVAILABLE, "s1 down", source="s1")
+    ctx.add_error(ErrorCode.FETCH_TIMEOUT, "s2 timeout", source="s2")
+    state = {
+        "request": SkillRequest(query="人形机器人", skill=SkillMode.FETCH),
+        "raw_articles": [article],
+        "filtered_articles": [article],
+        "sources_attempted": 20,
+    }
+    out = await agent.nodes.format_node(state, {"configurable": {"ctx": ctx}})
+
+    assert out["result"].degraded is False
+    assert any("新闻源" in warning for warning in out["result"].warnings)
+
+
+@pytest.mark.asyncio
+async def test_majority_source_failures_degrade(agent, article_factory):
+    article = article_factory("人形机器人产业观察")
+    ctx = RunContext()
+    for index in range(3):
+        ctx.add_error(ErrorCode.SOURCE_UNAVAILABLE, "down", source=f"s{index}")
+    state = {
+        "request": SkillRequest(query="人形机器人", skill=SkillMode.FETCH),
+        "raw_articles": [article],
+        "filtered_articles": [article],
+        "sources_attempted": 4,
+    }
+    out = await agent.nodes.format_node(state, {"configurable": {"ctx": ctx}})
+
+    assert out["result"].degraded is True
+
+
+@pytest.mark.asyncio
+async def test_empty_result_is_still_degraded(agent):
+    ctx = RunContext()
+    state = {
+        "request": SkillRequest(query="人形机器人", skill=SkillMode.FETCH),
+        "raw_articles": [],
+        "filtered_articles": [],
+        "sources_attempted": 10,
+    }
+    out = await agent.nodes.format_node(state, {"configurable": {"ctx": ctx}})
+    assert out["result"].degraded is True

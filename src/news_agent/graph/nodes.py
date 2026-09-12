@@ -25,6 +25,7 @@ from ..models import (
     SkillRequest,
     utcnow,
 )
+from ..quality import filter_spam
 from ..relevance import pick_relevant, rank_articles, relevance_score
 from ..rerank import Reranker, blend_scores
 from ..runtime import Metrics, RunContext, get_logger
@@ -163,7 +164,7 @@ class NewsGraphNodes:
         else:
             ctx.emit("fetch", f"抓取完成，共获得 {len(articles)} 篇原始文章")
 
-        return {"raw_articles": articles}
+        return {"raw_articles": articles, "sources_attempted": self._sources_attempted(request)}
 
     def _per_source_limit(self, request: SkillRequest, source_count: int) -> int:
         if source_count <= 0:
@@ -171,6 +172,12 @@ class NewsGraphNodes:
         # over-fetch a little: relevance filtering and de-duplication will trim
         per_source = request.limit * self.settings.fetch_per_source_multiplier / source_count
         return int(max(5, per_source + 3))
+
+    def _sources_attempted(self, request: SkillRequest) -> int:
+        try:
+            return len(self.deps.registry.select(request.sources))
+        except Exception:  # pragma: no cover - defensive
+            return len(self.deps.registry.names())
 
     # ------------------------------------------------------------------
     # filter
@@ -181,6 +188,25 @@ class NewsGraphNodes:
         raw = list(state.get("raw_articles") or [])
 
         with ctx.timeit("filter"):
+            # 0) 内容质量：先剔除博彩/SEO 站群/促销页——它们把查询词原样塞进
+            #    标题，词面分很高但完全不是新闻。
+            spam_dropped: list[RawArticle] = []
+            if self.settings.spam_filter_enabled:
+                raw, spam_dropped = filter_spam(
+                    raw, threshold=self.settings.spam_threshold
+                )
+                if spam_dropped:
+                    ctx.count("articles_spam_removed", len(spam_dropped))
+                    ctx.add_warning(
+                        f"已过滤 {len(spam_dropped)} 篇垃圾内容（博彩/SEO 站群/促销页）"
+                    )
+                    ctx.emit(
+                        "filter",
+                        f"质量过滤：移除 {len(spam_dropped)} 篇垃圾内容",
+                        event="progress",
+                        removed=len(spam_dropped),
+                    )
+
             deduped = self.deps.deduplicator.dedupe(raw)
             duplicates = len(raw) - len(deduped)
             ctx.count("articles_deduped", duplicates)
@@ -195,12 +221,14 @@ class NewsGraphNodes:
                 if request.threshold is not None
                 else self.settings.relevance_threshold
             )
-            # 词面打分（连续匹配约束 + 多关键词），来源权重只影响排序。
+            # 词面打分（连续匹配约束 + 多关键词）＋泛化查询的栏目路由，
+            # 来源权重只影响排序。
             scored = rank_articles(
                 deduped,
                 request.query,
                 keywords=request.keywords,
                 weights=self.deps.registry.weights(),
+                source_topics=self.deps.registry.topics(),
             )
             scores = {article.id: score for article, score in scored}
             # 有精排时先多取一些候选，让 LLM 有机会把临界的相关文章提到前面；
@@ -236,6 +264,7 @@ class NewsGraphNodes:
             "deduped_articles": deduped,
             "filtered_articles": selected,
             "duplicates_removed": duplicates,
+            "spam_removed": len(spam_dropped),
             "relevance_scores": scores,
         }
 
@@ -409,13 +438,13 @@ class NewsGraphNodes:
                 summary = await self.deps.heuristic.summarize(request, analyzed, ctx)
                 ctx.add_warning("未获得 LLM 摘要，已退化为启发式摘要")
 
-            degraded = any(
+            # 降级判定：只有"结果本身受影响"才算降级。少数新闻源失败是常态
+            # （RSS 下线、单站限流），不应把每次都标成降级，否则这个信号就失去意义。
+            hard_failure = any(
                 error.code
                 in {
                     ErrorCode.NO_RESULTS,
-                    ErrorCode.SOURCE_UNAVAILABLE,
-                    ErrorCode.FETCH_TIMEOUT,
-                    ErrorCode.RATE_LIMITED,
+                    ErrorCode.INTERNAL_ERROR,
                     ErrorCode.LLM_FAILED,
                     ErrorCode.LLM_TIMEOUT,
                     ErrorCode.CACHE_ERROR,
@@ -424,11 +453,32 @@ class NewsGraphNodes:
                 }
                 for error in ctx.errors
             )
+            source_failures = {
+                error.source or error.code.value
+                for error in ctx.errors
+                if error.code
+                in {
+                    ErrorCode.SOURCE_UNAVAILABLE,
+                    ErrorCode.FETCH_TIMEOUT,
+                    ErrorCode.RATE_LIMITED,
+                    ErrorCode.PARSE_ERROR,
+                }
+            }
+            attempted = int(state.get("sources_attempted") or 0)
+            partial_sources = bool(attempted) and len(source_failures) / attempted >= 0.5
+            degraded = hard_failure or partial_sources or not analyzed
+            if source_failures and not degraded:
+                ctx.add_warning(
+                    f"{len(source_failures)}/{attempted or '?'} 个新闻源本次未返回数据，"
+                    "结果可能略有缺失"
+                )
 
             counts = {
                 "fetched": len(raw),
+                "spam_removed": int(state.get("spam_removed") or 0),
                 "duplicates_removed": int(state.get("duplicates_removed") or 0),
                 "after_dedup": len(deduped),
+                "sources_attempted": int(state.get("sources_attempted") or 0),
                 "selected": len(filtered),
                 "analyzed": len(analyzed),
                 "sources_used": len({item.source for item in analyzed}),

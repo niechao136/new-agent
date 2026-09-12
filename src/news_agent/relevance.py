@@ -44,6 +44,109 @@ _CONTIGUITY_FLOOR = 0.7
 #: rescue an article that barely matches the query.
 _RECENCY_GATE = 0.3
 
+#: 栏目领域 -> 触发该领域的查询词（多语言）。
+#: 用于「泛化查询」的栏目路由，例如「科技新闻」应当直接采信科技栏目。
+TOPIC_QUERY_TERMS: dict[str, tuple[str, ...]] = {
+    "tech": (
+        "科技", "技术", "数码", "互联网", "人工智能", "芯片", "软件", "硬件", "信息技术",
+        "tech", "technology", "software", "hardware", "internet", "ai", "gadget",
+        "startup", "chip", "digital",
+    ),
+    "business": (
+        "财经", "金融", "商业", "经济", "股市", "投资", "基金", "债券", "银行", "财报",
+        "finance", "financial", "business", "economy", "economic", "market", "markets",
+        "stock", "stocks", "investment", "wall street", "trade",
+    ),
+    "world": (
+        "国际", "世界", "时政", "全球", "外交", "地缘", "美国", "欧洲", "中东", "亚太",
+        "world", "international", "global", "politics", "diplomacy", "geopolitics",
+    ),
+    "sports": (
+        "体育", "足球", "篮球", "赛事", "奥运", "网球", "世界杯", "欧冠",
+        "sport", "sports", "football", "soccer", "basketball", "tennis", "olympic", "nba",
+    ),
+    "entertainment": (
+        "娱乐", "影视", "电影", "明星", "综艺", "音乐", "电视剧",
+        "entertainment", "movie", "movies", "film", "celebrity", "hollywood", "music",
+    ),
+    "health": (
+        "健康", "医疗", "医药", "医学", "疾病", "疫苗", "养生",
+        "health", "healthcare", "medical", "medicine", "drug", "disease", "vaccine",
+    ),
+}
+
+#: 泛化新闻词（不含领域信息）：只有这些词构成的查询没有检索区分度。
+GENERIC_NEWS_TERMS: tuple[str, ...] = (
+    "新闻", "资讯", "报道", "消息", "热点", "动态", "最新", "要闻", "快讯", "简报",
+    "摘要", "汇总", "总结", "新闻资讯",
+    "news", "headline", "headlines", "latest", "update", "updates", "briefing",
+    "daily", "weekly", "roundup", "digest", "report",
+)
+
+#: 泛化查询命中栏目后给予的基础分（高于默认阈值 0.2，低于强词面命中）。
+TOPIC_ROUTING_BASE = 0.5
+
+
+def _norm_terms(terms: tuple[str, ...]) -> tuple[str, ...]:
+    normalized = (normalize_for_compare(term) for term in terms)
+    return tuple(term for term in normalized if term)
+
+
+_TOPIC_TERMS_NORM: dict[str, tuple[str, ...]] = {
+    topic: _norm_terms(terms) for topic, terms in TOPIC_QUERY_TERMS.items()
+}
+_GENERIC_TERMS_NORM: tuple[str, ...] = _norm_terms(GENERIC_NEWS_TERMS)
+
+
+def _strip_terms(text: str, terms: tuple[str, ...]) -> str:
+    for term in sorted(terms, key=len, reverse=True):
+        text = text.replace(term, "")
+    return text
+
+
+def matched_topics(query: str) -> set[str]:
+    """领域标签集合：查询词命中了哪些栏目（如「科技新闻」→ ``{"tech"}``）。"""
+    norm = normalize_for_compare(query)
+    if not norm:
+        return set()
+    return {
+        topic
+        for topic, terms in _TOPIC_TERMS_NORM.items()
+        if any(term in norm for term in terms)
+    }
+
+
+def is_broad_query(query: str, matched: set[str] | None = None) -> bool:
+    """True 表示查询只是"某领域 + 新闻"这类泛化表达，没有具体检索对象。
+
+    例如「科技新闻」「财经新闻」「ai chips」「sports news」为 True，
+    「人形机器人」「固态电池」「英伟达财报」为 False。
+    """
+    norm = normalize_for_compare(query)
+    if not norm:
+        return False
+    matched = matched_topics(query) if matched is None else matched
+    residual = _strip_terms(norm, _GENERIC_TERMS_NORM)
+    if not residual:
+        return True  # 只说了「新闻/最新/资讯」
+    if not matched:
+        return False
+    return any(
+        len(_strip_terms(residual, _TOPIC_TERMS_NORM[topic])) <= 1 for topic in matched
+    )
+
+
+def topic_floor(query: str, source_topic: str | None, *, matched: set[str] | None = None) -> float:
+    """栏目路由基础分：泛化查询 + 领域匹配的栏目来源才能拿到。"""
+    if not source_topic:
+        return 0.0
+    matched = matched_topics(query) if matched is None else matched
+    if not matched or source_topic not in matched:
+        return 0.0
+    if not is_broad_query(query, matched):
+        return 0.0
+    return TOPIC_ROUTING_BASE
+
 
 def longest_common_run(left: str, right: str) -> int:
     """Length of the longest contiguous substring shared by ``left`` and ``right``."""
@@ -187,16 +290,36 @@ def rank_articles(
     reference_time: datetime | None = None,
     keywords: Sequence[str] | None = None,
     weights: Mapping[str, float] | None = None,
+    source_topics: Mapping[str, str] | None = None,
 ) -> list[tuple[RawArticle, float]]:
     """Return ``[(article, score)]`` sorted by (weighted score, score, time) desc.
 
     The returned score is the raw lexical score (threshold semantics), while the
     ordering also takes the source ``weight`` into account.
+
+    ``source_topics`` maps a source name to its栏目领域（tech/business/...）。
+    当 ``query`` 是泛化表达（「科技新闻」）时，命中领域的栏目来源会拿到
+    :data:`TOPIC_ROUTING_BASE` 的基础分——这既让泛查询有合理结果，也解决了
+    中文泛查询无法词面命中英文源的问题。
     """
+    items = list(articles)
     terms = _terms(query, keywords)
+    matched = matched_topics(query) if source_topics else set()
+
+    def _floor(article: RawArticle) -> float:
+        if not source_topics:
+            return 0.0
+        return topic_floor(query, source_topics.get(article.source), matched=matched)
+
     scored = [
-        (article, _article_score(article, terms, reference_time=reference_time))
-        for article in articles
+        (
+            article,
+            max(
+                _article_score(article, terms, reference_time=reference_time),
+                _floor(article),
+            ),
+        )
+        for article in items
     ]
 
     def _weight(article: RawArticle) -> float:
@@ -292,10 +415,15 @@ def select_relevant(
 
 
 __all__ = [
+    "TOPIC_QUERY_TERMS",
+    "TOPIC_ROUTING_BASE",
     "diversify",
+    "is_broad_query",
     "longest_common_run",
+    "matched_topics",
     "pick_relevant",
     "rank_articles",
     "relevance_score",
     "select_relevant",
+    "topic_floor",
 ]

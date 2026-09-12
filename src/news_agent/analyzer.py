@@ -27,7 +27,7 @@ from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential_jitter
 from .config import LLMSettings
 from .models import AnalyzedArticle, ErrorCode, RawArticle, SkillRequest
 from .runtime import RunContext, get_logger
-from .text_utils import split_sentences, tokenize, truncate
+from .text_utils import clean_llm_text, split_sentences, tokenize, truncate
 
 log = get_logger("analyzer")
 
@@ -298,6 +298,7 @@ Write a single coherent synthesis in {language_name} of at most 300 words:
 2. 3-5 bullet points on the most important facts or divergences,
 3. one closing sentence on what remains uncertain or contested.
 Do not add information that is not in the partial summaries.
+Answer with plain text only: no JSON, no code fences, no headings.
 """
 
 _CHUNK_PROMPT = """Summarise the following batch of news items about "{query}" in {language_name}.
@@ -629,7 +630,7 @@ class LLMAnalyzer:
                     block.get("text", "") if isinstance(block, dict) else str(block)
                     for block in content
                 )
-            text = str(content).strip()
+            text = clean_llm_text(str(content))
             if not text:
                 raise LLMError("empty completion")
             return text

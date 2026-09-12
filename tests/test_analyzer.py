@@ -18,6 +18,7 @@ from news_agent.analyzer import (
 from news_agent.config import LLMSettings, Settings
 from news_agent.models import AnalyzedArticle, ErrorCode, SkillRequest
 from news_agent.runtime import RunContext
+from news_agent.text_utils import clean_llm_text
 
 
 def _analyzed(count: int, title: str = "人形机器人产业进展") -> list[AnalyzedArticle]:
@@ -239,3 +240,37 @@ async def test_unconfigured_llm_analyzer_raises_llm_error(monkeypatch, article_f
             SkillRequest(query="q"), [(0, article)]
         )
     assert "connection refused" in str(excinfo.value) or "attempt" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# LLM 文本清洗（线上曾把 ```json {"synthesis": ...} 原样当作摘要返回）
+# ---------------------------------------------------------------------------
+def test_clean_llm_text_unwraps_json_envelope():
+    raw = '```json\n{"synthesis": "近期科技新闻涵盖数字化革新。"}\n```'
+    assert clean_llm_text(raw) == "近期科技新闻涵盖数字化革新。"
+
+
+def test_clean_llm_text_strips_plain_fence():
+    assert clean_llm_text("```\n- 要点一\n- 要点二\n```") == "- 要点一\n- 要点二"
+
+
+def test_clean_llm_text_keeps_prose_and_empty():
+    assert clean_llm_text("第一点\n第二点") == "第一点\n第二点"
+    assert clean_llm_text(None) == ""
+    assert clean_llm_text("   ") == ""
+
+
+def test_clean_llm_text_falls_back_to_string_values():
+    assert clean_llm_text('{"a": "甲", "b": "乙"}') == "甲\n乙"
+
+
+async def test_call_text_cleans_model_output(monkeypatch):
+    analyzer = LLMAnalyzer(LLMSettings(model="m", api_key="k"))
+
+    class Chain:
+        async def ainvoke(self, messages: Any) -> Any:
+            return type("Msg", (), {"content": '```json\n{"summary": "清洗后的摘要"}\n```'})()
+
+    monkeypatch.setattr(analyzer, "_get_llm", lambda: Chain())
+    text = await analyzer._call_text("prompt")  # noqa: SLF001
+    assert text == "清洗后的摘要"

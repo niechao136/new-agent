@@ -4,14 +4,20 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+import pytest
+
 from news_agent.models import SkillRequest, utcnow
 from news_agent.relevance import (
+    TOPIC_ROUTING_BASE,
     diversify,
+    is_broad_query,
     longest_common_run,
+    matched_topics,
     pick_relevant,
     rank_articles,
     relevance_score,
     select_relevant,
+    topic_floor,
 )
 
 
@@ -78,6 +84,82 @@ def test_contiguity_discounts_boundary_matches(article_factory):
     partial = article_factory("行业周报：芯片价格波动")
     scored = dict((a.title, s) for a, s in rank_articles([*corpus, partial], query))
     assert scored["行业周报：芯片价格波动"] < scored["量子计算芯片研究进展 0"] / 3
+
+
+# ---------------------------------------------------------------------------
+# 泛化查询的栏目路由
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "query",
+    ["科技新闻", "财经新闻", "体育新闻", "人工智能", "AI芯片", "tech news", "sports news"],
+)
+def test_broad_queries_are_detected(query):
+    assert is_broad_query(query)
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["人形机器人", "固态电池", "英伟达财报", "特斯拉新闻", "俄乌冲突"],
+)
+def test_specific_queries_are_not_broad(query):
+    assert not is_broad_query(query)
+
+
+def test_matched_topics():
+    assert matched_topics("科技新闻") == {"tech"}
+    assert matched_topics("财经新闻") == {"business"}
+    assert matched_topics("人形机器人") == set()
+
+
+def test_topic_floor_only_for_matching_broad_queries():
+    assert topic_floor("科技新闻", "tech") == TOPIC_ROUTING_BASE
+    assert topic_floor("科技新闻", "sports") == 0.0
+    assert topic_floor("人形机器人", "tech") == 0.0
+
+
+def test_topic_routing_rescues_english_articles_for_generic_query(article_factory):
+    """「科技新闻」这类泛查询无法词面命中英文标题，靠栏目路由兜底。"""
+    english_tech = article_factory(
+        "Apple unveils new MacBook lineup", source="techcrunch"
+    )
+    english_sport = article_factory(
+        "United win derby in stoppage time", source="bbc-sport"
+    )
+    topics = {"techcrunch": "tech", "bbc-sport": "sports"}
+
+    assert relevance_score(english_tech, "科技新闻") == 0.0
+
+    scored = dict(
+        (article.source, score)
+        for article, score in rank_articles(
+            [english_tech, english_sport], "科技新闻", source_topics=topics
+        )
+    )
+    assert scored["techcrunch"] == TOPIC_ROUTING_BASE
+    assert scored["bbc-sport"] == 0.0
+
+
+def test_topic_routing_does_not_apply_to_specific_queries(article_factory):
+    english_tech = article_factory("Solid-state battery breakthrough", source="techcrunch")
+    scored = rank_articles(
+        [english_tech], "人形机器人", source_topics={"techcrunch": "tech"}
+    )
+    assert scored[0][1] == 0.0
+
+
+def test_lexical_match_still_outranks_topic_floor(article_factory):
+    on_topic = article_factory("科技新闻：某公司发布新一代芯片", source="ithome")
+    routed = article_factory("Apple unveils new MacBook lineup", source="techcrunch")
+    scored = dict(
+        (article.source, score)
+        for article, score in rank_articles(
+            [routed, on_topic],
+            "科技新闻",
+            source_topics={"ithome": "tech", "techcrunch": "tech"},
+        )
+    )
+    assert scored["ithome"] > TOPIC_ROUTING_BASE
+    assert scored["techcrunch"] == TOPIC_ROUTING_BASE
 
 
 # ---------------------------------------------------------------------------
