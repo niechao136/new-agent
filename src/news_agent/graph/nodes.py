@@ -240,7 +240,9 @@ class NewsGraphNodes:
                 scored,
                 threshold=threshold,
                 limit=retrieve_limit,
-                per_source_cap=self._per_source_cap(retrieve_limit),
+                # 配额按"最终返回条数"计算：多取的候选只是为了给精排留余量，
+                # 不应放宽单一来源的占比上限。
+                per_source_cap=self._per_source_cap(request.limit),
             )
             if topped_up:
                 ctx.add_warning(

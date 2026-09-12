@@ -169,6 +169,44 @@ async def test_reported_broad_query_scenario(agent, article_factory):
 # 泛化查询的栏目路由（节点级）
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
+async def test_diversity_cap_uses_final_limit_when_reranking(agent, article_factory):
+    """多取候选给精排用，但来源配额必须按最终 limit 计算。"""
+
+    class _Reranker:
+        name = "fake"
+        uses_llm = True
+
+        async def rerank(self, query, keywords, candidates, *, ctx=None):
+            return {}
+
+    agent.nodes.deps.reranker = _Reranker()  # type: ignore[assignment]
+    dominant = [
+        "人形机器人产业观察",
+        "人形机器人量产计划公布",
+        "人形机器人技术路线之争",
+        "人形机器人商业化提速",
+        "人形机器人企业融资回暖",
+        "人形机器人行业标准启动",
+    ]
+    others = [
+        "人形机器人上岗工厂一线",
+        "人形机器人马拉松赛事落幕",
+        "人形机器人成本下探三成",
+    ]
+    articles = [article_factory(title, source="ithome") for title in dominant]
+    articles += [article_factory(title, source="other") for title in others]
+    state = {
+        "request": SkillRequest(query="人形机器人", limit=6),
+        "raw_articles": articles,
+    }
+    out = await agent.nodes.filter_node(state, {"configurable": {}})
+
+    selected = out["filtered_articles"]
+    assert len(selected) == 6
+    assert sum(1 for article in selected if article.source == "ithome") <= 3
+
+
+@pytest.mark.asyncio
 async def test_filter_node_routes_broad_query_by_topic(agent, article_factory):
     english_tech = article_factory(
         "Apple unveils new MacBook lineup", source="techcrunch"
