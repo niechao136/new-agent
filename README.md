@@ -170,6 +170,16 @@ export NEWS_AGENT_GNEWS_KEY=xxx          # 可选，启用 GNews
 镜像两阶段构建：第一段用 `uv` 按 `uv.lock` 把依赖装进自包含的 `/opt/venv`，
 第二段只拷贝这个 venv（不带编译器、uv、测试代码），以 UID 10001 非 root 运行。
 
+builder 阶段的层顺序是刻意安排的，改代码时不会触发依赖重装：
+
+| 层 | 输入 | 何时失效 |
+| --- | --- | --- |
+| 依赖层 | `pyproject.toml` + `uv.lock` | 只有增删/升级依赖时（≈25s） |
+| 项目层 | `README.md` + `src/` | 改源码或文档时（≈3s） |
+
+`README.md` 必须在项目层：`pyproject.toml` 把它声明为项目 readme，放进依赖层会导致
+「改一行文档就重新下载 67 个依赖」。
+
 ```bash
 # 构建 + 运行
 docker build -t news-agent:0.1.0 .
