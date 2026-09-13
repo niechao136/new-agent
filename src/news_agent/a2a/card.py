@@ -233,6 +233,36 @@ def _struct(payload: dict[str, Any]) -> struct_pb2.Struct:
     return json_format.ParseDict(payload, struct_pb2.Struct())
 
 
+def security_declaration(settings: Settings) -> tuple[dict[str, a2a_pb2.SecurityScheme], list[a2a_pb2.SecurityRequirement]]:
+    """A2A ``securitySchemes`` / ``security`` advertised when auth is enabled.
+
+    Callers may use either the ``Authorization: Bearer`` header or the
+    dedicated API-key header (see :class:`~news_agent.config.AuthSettings`).
+    """
+    if not settings.auth.configured:
+        return {}, []
+    schemes = {
+        "bearer": a2a_pb2.SecurityScheme(
+            http_auth_security_scheme=a2a_pb2.HTTPAuthSecurityScheme(
+                scheme="bearer",
+                description="API key as 'Authorization: Bearer <key>'.",
+            )
+        ),
+        "api_key": a2a_pb2.SecurityScheme(
+            api_key_security_scheme=a2a_pb2.APIKeySecurityScheme(
+                location="header",
+                name=settings.auth.api_key_header,
+                description=f"API key as '{settings.auth.api_key_header}: <key>'.",
+            )
+        ),
+    }
+    requirements = [
+        a2a_pb2.SecurityRequirement(schemes={"bearer": a2a_pb2.StringList()}),
+        a2a_pb2.SecurityRequirement(schemes={"api_key": a2a_pb2.StringList()}),
+    ]
+    return schemes, requirements
+
+
 def build_agent_card(settings: Settings) -> a2a_pb2.AgentCard:
     """Build the A2A ``AgentCard`` for this news agent."""
     url = settings.resolve_agent_url()
@@ -253,6 +283,7 @@ def build_agent_card(settings: Settings) -> a2a_pb2.AgentCard:
         ),
         required=False,
     )
+    security_schemes, security_requirements = security_declaration(settings)
 
     return a2a_pb2.AgentCard(
         name=settings.agent_name,
@@ -279,6 +310,8 @@ def build_agent_card(settings: Settings) -> a2a_pb2.AgentCard:
         ),
         default_input_modes=["application/json", "text/plain"],
         default_output_modes=["application/json", "text/plain"],
+        security_schemes=security_schemes,
+        security_requirements=security_requirements,
         skills=[
             a2a_pb2.AgentSkill(
                 id=skill["id"],
@@ -317,6 +350,7 @@ __all__ = [
     "SKILL_SCHEMA_EXTENSION_URI",
     "agent_card_dict",
     "build_agent_card",
+    "security_declaration",
     "skill_descriptions",
     "skill_ids",
 ]

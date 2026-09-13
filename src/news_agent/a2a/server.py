@@ -40,6 +40,7 @@ from fastapi.responses import JSONResponse
 from ..config import Settings, load_settings
 from ..graph.agent import NewsAgent
 from ..runtime import Metrics, configure_logging, get_logger
+from .auth import AuthMiddleware
 from .card import (
     AGENT_CARD_LEGACY_PATH,
     AGENT_CARD_WELL_KNOWN_PATH,
@@ -128,6 +129,10 @@ def create_app(
         version=settings.agent_version,
         lifespan=lifespan,
     )
+    # Inbound authentication (API key). Registered as ASGI middleware so it
+    # also covers the SDK-generated protocol routes below. When disabled the
+    # middleware passes everything through.
+    app.add_middleware(AuthMiddleware, auth=settings.auth)
     app.state.settings = settings
     app.state.agent = agent
     app.state.agent_card = card

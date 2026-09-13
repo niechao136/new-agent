@@ -187,6 +187,30 @@ class LLMSettings(BaseModel):
         return self.base_url or os.environ.get("OPENAI_BASE_URL")
 
 
+class AuthSettings(BaseModel):
+    """Inbound authentication for the HTTP / A2A endpoints.
+
+    Static API-key based scheme: callers must present one of the configured
+    keys either as ``Authorization: Bearer <key>`` or in the dedicated header
+    (``X-API-Key`` by default).  Health probes (``/healthz``, ``/readyz``) and
+    the Agent Card discovery paths (``/.well-known/*``) always stay public so
+    orchestrators and A2A gateways can discover the agent.
+
+    Configure via ``NEWS_AGENT_AUTH_ENABLED`` / ``NEWS_AGENT_AUTH_API_KEYS``
+    (comma separated) / ``NEWS_AGENT_AUTH_API_KEY_HEADER``.
+    """
+
+    enabled: bool = False
+    #: Valid API keys. An empty list disables enforcement even when ``enabled``.
+    api_keys: list[str] = Field(default_factory=list)
+    #: Header accepted as an alternative to ``Authorization: Bearer``.
+    api_key_header: str = "X-API-Key"
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.enabled and self.api_keys)
+
+
 class Settings(BaseModel):
     """Top level settings object."""
 
@@ -240,6 +264,8 @@ class Settings(BaseModel):
     user_agents: list[str] = Field(default_factory=lambda: list(DEFAULT_USER_AGENTS))
     llm: LLMSettings = Field(default_factory=LLMSettings)
     sources: list[SourceConfig] = Field(default_factory=list)
+    #: inbound authentication of the HTTP / A2A endpoints
+    auth: AuthSettings = Field(default_factory=AuthSettings)
 
     # ------------------------------------------------------------------
     # construction helpers
@@ -324,6 +350,13 @@ class Settings(BaseModel):
                 rerank_max_excerpt_chars=_env_int("LLM_RERANK_MAX_EXCERPT_CHARS", 200),
             )
 
+            auth = AuthSettings(
+                enabled=_env_bool("AUTH_ENABLED", False),
+                api_keys=_env_list("AUTH_API_KEYS"),
+                api_key_header=_env("AUTH_API_KEY_HEADER", "X-API-Key")
+                or "X-API-Key",
+            )
+
             return cls(
                 agent_name=_env("AGENT_NAME", "news-agent") or "news-agent",
                 agent_version=_env("AGENT_VERSION", "0.1.0") or "0.1.0",
@@ -355,6 +388,7 @@ class Settings(BaseModel):
                 cache_ttl_s=_env_int("CACHE_TTL_S", 900),
                 llm=llm,
                 sources=sources,
+                auth=auth,
             )
         finally:
             if original is not None:

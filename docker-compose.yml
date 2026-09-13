@@ -48,6 +48,13 @@ services:
       NEWS_AGENT_SOURCE_DIVERSITY: ${NEWS_AGENT_SOURCE_DIVERSITY:-1}
       NEWS_AGENT_SPAM_FILTER_ENABLED: ${NEWS_AGENT_SPAM_FILTER_ENABLED:-1}
       NEWS_AGENT_SPAM_THRESHOLD: ${NEWS_AGENT_SPAM_THRESHOLD:-0.6}
+
+      # --- inbound authentication (API key) ----------------------------------
+      # 1 = require an API key on all endpoints except health probes and the
+      # /.well-known agent card discovery paths.
+      NEWS_AGENT_AUTH_ENABLED: ${NEWS_AGENT_AUTH_ENABLED:-0}
+      NEWS_AGENT_AUTH_API_KEYS: ${NEWS_AGENT_AUTH_API_KEYS:-}
+      NEWS_AGENT_AUTH_API_KEY_HEADER: ${NEWS_AGENT_AUTH_API_KEY_HEADER:-X-API-Key}
     volumes:
       # SQLite cache + article history; keeps warm data across restarts
       - news-agent-data:/data

@@ -28,6 +28,7 @@
 | 长文本处理 | map-reduce 摘要，避免超长 prompt；分批小结失败可退化为拼接 |
 | 双缓存 | SQLite 抓取缓存（TTL）+ 结果缓存 + 文章历史（增量识别新文章） |
 | 稳定降级 | 源不可用/超时/LLM 失败/任务超时都返回**部分结果 + 结构化错误码**，绝不静默；`degraded` 只在结果真的受影响（无结果、多数源失败、LLM 降级）时置位，少数源失败仅告警 |
+| 入站鉴权 | 可选的 API Key 鉴权（`Authorization: Bearer` 或 `X-API-Key` 头），覆盖 JSON-RPC/REST/SSE 全部协议端点；健康检查与 Agent Card 发现路径保持公开，Agent Card 自动声明 `securitySchemes` |
 | 可观测性 | 每节点耗时、抓取成功率、LLM token 数、`/metrics` 指标快照 |
 | 离线可跑 | 不配置任何 key（甚至无网络）也能用 mock 源 + 启发式分析完整跑通 |
 | 容器化部署 | 多阶段 `Dockerfile`（依赖锁文件安装、非 root、内置健康检查）+ `docker-compose.yml` |
@@ -233,6 +234,26 @@ python -m news_agent.cli call "固态电池" --base-url http://localhost:9901
   （依赖均有对应 wheel，镜像内不需要编译工具链）；
 - 依赖层只在 `pyproject.toml` / `uv.lock` 变化时重建，改业务代码只重建项目层。
 
+### 3.7 入站鉴权（可选）
+
+默认关闭；开启后除 `/healthz`、`/readyz` 和 `/.well-known/*`（Agent Card 发现）外，
+所有端点（JSON-RPC、REST、SSE、`/metrics`、`/skills` 等）都要求 API Key：
+
+```bash
+export NEWS_AGENT_AUTH_ENABLED=1
+export NEWS_AGENT_AUTH_API_KEYS=key-for-gateway,key-for-cli   # 逗号分隔多个 key
+```
+
+调用方在请求头中任选其一携带：
+
+```bash
+curl -H 'Authorization: Bearer key-for-gateway' http://localhost:9901/skills
+curl -H 'X-API-Key: key-for-gateway' http://localhost:9901/skills
+```
+
+开启后 Agent Card 会自动声明 `securitySchemes`（bearer + api_key）与
+`security` 要求，符合 A2A 规范的调用方（如 a2a-gateway）能据此发现鉴权方式。
+
 ---
 
 ## 4. 配置项
@@ -260,6 +281,7 @@ python -m news_agent.cli call "固态电池" --base-url http://localhost:9901
 | `LLM_BATCH_SIZE` / `LLM_CONCURRENCY` / `LLM_SUMMARY_CHUNK_SIZE` | 6 / 4 / 6 | 批大小、并发上限、map-reduce 分块 |
 | `USE_MOCK` | 0 | 强制使用确定性 mock 源（离线） |
 | `EXTRA_RSS_FEEDS` | - | 追加自定义 RSS（含 `{query}` 占位符即变为关键词搜索） |
+| `AUTH_ENABLED` / `AUTH_API_KEYS` / `AUTH_API_KEY_HEADER` | 0 / - / X-API-Key | 入站鉴权：开启后除 `/healthz`、`/readyz`、`/.well-known/*` 外的所有端点要求 API Key（`Authorization: Bearer <key>` 或自定义头）；`AUTH_API_KEYS` 逗号分隔多个 key，为空则不强制 |
 
 ---
 
