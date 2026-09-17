@@ -17,9 +17,16 @@ import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
-from a2a.client import A2ACardResolver, Client, ClientConfig, ClientFactory
+from a2a.client import (
+    A2ACardResolver,
+    AgentCardResolutionError,
+    Client,
+    ClientConfig,
+    ClientFactory,
+)
 from a2a.helpers.proto_helpers import (
     get_artifact_text,
     get_message_text,
@@ -47,6 +54,14 @@ def state_name(state: int) -> str:
     """``TASK_STATE_COMPLETED`` -> ``completed``."""
     name = a2a_pb2.TaskState.Name(state)
     return name.removeprefix("TASK_STATE_").lower()
+
+
+def _origin_url(url: str) -> str:
+    """取 URL 的 ``scheme://host[:port]`` 部分；本就不带路径时原样返回（查询串保留）。"""
+    parts = urlsplit(url)
+    if not parts.path or parts.path == "/":
+        return url
+    return urlunsplit((parts.scheme, parts.netloc, "", parts.query, ""))
 
 
 @dataclass
@@ -106,9 +121,19 @@ class NewsA2AClient:
 
     # ------------------------------------------------------------------
     async def fetch_card(self) -> a2a_pb2.AgentCard:
-        """Resolve the agent card (``/.well-known/agent-card.json``)."""
-        resolver = A2ACardResolver(self._http, self.base_url)
-        self.card = await resolver.get_agent_card()
+        """Resolve the agent card (``/.well-known/agent-card.json``).
+
+        带路径的 ``base_url`` 解析失败时回退到 origin 再试一次：调用方常把 RPC
+        端点（如 ``http://host:9901/a2a``）当作服务地址填入，此时 well-known
+        会被拼到路径下而 404，而卡片实际挂在 origin 下。
+        """
+        try:
+            self.card = await A2ACardResolver(self._http, self.base_url).get_agent_card()
+        except (AgentCardResolutionError, httpx.HTTPError):
+            origin = _origin_url(self.base_url)
+            if origin == self.base_url:
+                raise
+            self.card = await A2ACardResolver(self._http, origin).get_agent_card()
         return self.card
 
     async def connect(self) -> a2a_pb2.AgentCard:

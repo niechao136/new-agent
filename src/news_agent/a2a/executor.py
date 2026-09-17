@@ -316,9 +316,12 @@ class NewsAgentExecutor(AgentExecutor):
 
         # A2A 1.0 requires the agent to publish the Task itself before any
         # TaskStatusUpdateEvent / TaskArtifactUpdateEvent is accepted.
-        await event_queue.enqueue_event(
-            self._initial_task(task_id, context_id, context.message)
-        )
+        # 续跑（current_task 非空）时任务已存在：重发 SUBMITTED 快照会覆盖状态，
+        # 因此只在首轮发布（与 travel-agent 的实现一致）。
+        if context.current_task is None:
+            await event_queue.enqueue_event(
+                self._initial_task(task_id, context_id, context.message)
+            )
 
         try:
             request = await self._build_request(context)

@@ -9,10 +9,12 @@ compatibility names).
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
+from a2a.helpers.proto_helpers import new_data_part
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import a2a_pb2
@@ -497,3 +499,78 @@ def test_app_is_wired_with_sdk_components(app):
     assert isinstance(app.state.task_store, InMemoryTaskStore)
     assert isinstance(app.state.news_executor, NewsAgentExecutor)
     assert isinstance(app.state.agent_card, a2a_pb2.AgentCard)
+
+
+# ---------------------------------------------------------------------------
+# executor 事件语义：首轮发布 Task 本体 / 续跑不重发
+# ---------------------------------------------------------------------------
+class _FakeQueue:
+    """捕获 executor 发往 event_queue 的事件（TaskUpdater 的最小宿主）。"""
+
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+
+    async def enqueue_event(self, event: Any) -> None:
+        self.events.append(event)
+
+
+class _StubAgent:
+    async def run(self, request: Any, ctx: Any = None) -> NewsResult:
+        return NewsResult(query=request.query, mode=request.skill, summary="ok")
+
+
+def _stub_context(*, current_task: Any) -> Any:
+    message = a2a_pb2.Message(
+        message_id="m-1",
+        role=a2a_pb2.ROLE_USER,
+        parts=[new_data_part({"query": "人形机器人", "skill": "fetch_news"})],
+    )
+    return SimpleNamespace(
+        task_id="t-1",
+        context_id="c-1",
+        current_task=current_task,
+        message=message,
+        metadata=None,
+    )
+
+
+async def test_executor_publishes_initial_task_on_first_run(settings):
+    """首轮：Task 快照必须是第一个事件（A2A 1.0 的硬性要求）。"""
+    executor = NewsAgentExecutor(lambda: _awaitable(_StubAgent()), settings)
+    queue = _FakeQueue()
+
+    await executor.execute(_stub_context(current_task=None), queue)
+
+    assert isinstance(queue.events[0], a2a_pb2.Task)
+    assert queue.events[0].status.state == a2a_pb2.TASK_STATE_SUBMITTED
+
+
+async def test_executor_does_not_republish_task_on_resume(settings):
+    """续跑（current_task 非空）时不重发 SUBMITTED 快照，避免覆盖已有任务状态。"""
+    executor = NewsAgentExecutor(lambda: _awaitable(_StubAgent()), settings)
+    queue = _FakeQueue()
+
+    await executor.execute(
+        _stub_context(current_task=SimpleNamespace(id="t-1")), queue
+    )
+
+    assert not any(isinstance(event, a2a_pb2.Task) for event in queue.events)
+    assert any(isinstance(event, a2a_pb2.TaskArtifactUpdateEvent) for event in queue.events)
+    last = queue.events[-1]
+    assert isinstance(last, a2a_pb2.TaskStatusUpdateEvent)
+    assert last.status.state == a2a_pb2.TASK_STATE_COMPLETED
+
+
+# ---------------------------------------------------------------------------
+# 客户端卡片解析：带路径地址的回退
+# ---------------------------------------------------------------------------
+async def test_client_falls_back_to_origin_when_base_url_has_path(app):
+    """base_url 误填带路径的 URL（如 .../a2a）时，卡片解析回退到 origin。"""
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url=BASE_URL) as raw_http:
+        client = NewsA2AClient(f"{BASE_URL}/a2a", httpx_client=raw_http)
+        try:
+            card = await client.fetch_card()
+        finally:
+            await client.close()
+    assert card.name == "news-agent"
