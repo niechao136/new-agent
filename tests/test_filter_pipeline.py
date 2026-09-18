@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from news_agent.graph.state import NewsState
 from news_agent.models import ErrorCode, SkillMode, SkillRequest
 from news_agent.runtime import RunContext
 
@@ -118,7 +119,7 @@ async def test_spam_filter_can_be_disabled(monkeypatch, article_factory):
     instance = await NewsAgent.create(settings)
     try:
         spam = article_factory("正规买球万博APP科技新闻摘要合集", summary="提供下注与投注参考。")
-        state = {
+        state: NewsState = {
             "request": SkillRequest(query="科技新闻", limit=5),
             "raw_articles": [spam],
         }

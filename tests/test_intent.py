@@ -67,6 +67,7 @@ def test_today():
 def test_past_days():
     intent = _LLMIntent(search_query="AI", time_type="past_days", past_days=3)
     since, _, _ = intent_to_window(intent, now=NOW)
+    assert since is not None
     assert (NOW - since).days == 3
 
 
@@ -167,6 +168,7 @@ async def test_llm_success_path(monkeypatch):
     intent = await parse_query_intent("最近两天的固态电池新闻", llm, now=NOW)
     assert intent.search_query == "固态电池"
     assert intent.keywords == ["solid-state battery"]
+    assert intent.since is not None
     assert (NOW - intent.since).days == 2
 
 

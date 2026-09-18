@@ -10,6 +10,7 @@ from news_agent.models import RawArticle, SkillRequest
 from news_agent.rerank import (
     LLMReranker,
     RerankError,
+    _ItemScore,
     _RerankOutput,
     blend_scores,
     build_reranker,
@@ -65,7 +66,12 @@ def test_build_reranker_requires_llm_configuration():
 async def test_llm_reranker_returns_scores_by_id(article_factory):
     candidates = [article_factory(f"人形机器人快讯 {index}") for index in range(3)]
     reranker = _reranker_with(
-        _RerankOutput(results=[{"index": 2, "relevance": 0.9}, {"index": 0, "relevance": 0.1}])
+        _RerankOutput(
+            results=[
+                _ItemScore(index=2, relevance=0.9),
+                _ItemScore(index=0, relevance=0.1),
+            ]
+        )
     )
     scores = await reranker.rerank("人形机器人", [], candidates)
     assert scores == {candidates[2].id: 0.9, candidates[0].id: 0.1}
@@ -74,7 +80,7 @@ async def test_llm_reranker_returns_scores_by_id(article_factory):
 @pytest.mark.asyncio
 async def test_llm_reranker_ignores_out_of_range_indices(article_factory):
     candidates = [article_factory("人形机器人快讯")]
-    reranker = _reranker_with(_RerankOutput(results=[{"index": 7, "relevance": 1.0}]))
+    reranker = _reranker_with(_RerankOutput(results=[_ItemScore(index=7, relevance=1.0)]))
     with pytest.raises(RerankError):
         await reranker.rerank("人形机器人", [], candidates)
 

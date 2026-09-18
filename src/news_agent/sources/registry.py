@@ -68,11 +68,13 @@ class SourceRegistry:
 
     def topics(self) -> dict[str, str]:
         """Source name -> 栏目领域（tech/business/...），搜索类源不在其中。"""
-        return {
-            name: source.topic
-            for name, source in self._sources.items()
-            if getattr(source, "topic", None)
-        }
+        topics: dict[str, str] = {}
+        for name, source in self._sources.items():
+            # 只有栏目型源（RSS）有 topic；搜索型源没有该属性，故用 getattr 兜底
+            topic = getattr(source, "topic", None)
+            if isinstance(topic, str) and topic:
+                topics[name] = topic
+        return topics
 
     def select(self, names: Iterable[str] | None = None) -> list[NewsSource]:
         if not names:

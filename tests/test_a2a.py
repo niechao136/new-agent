@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
 from a2a.helpers.proto_helpers import new_data_part
+from a2a.server.events import EventQueue
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import a2a_pb2
@@ -513,6 +514,10 @@ class _FakeQueue:
     async def enqueue_event(self, event: Any) -> None:
         self.events.append(event)
 
+    def as_event_queue(self) -> EventQueue:
+        """executor 只用到 `enqueue_event`，替身可直接顶替真实队列（无需心跳/监听）。"""
+        return cast(EventQueue, self)
+
 
 class _StubAgent:
     async def run(self, request: Any, ctx: Any = None) -> NewsResult:
@@ -539,7 +544,7 @@ async def test_executor_publishes_initial_task_on_first_run(settings):
     executor = NewsAgentExecutor(lambda: _awaitable(_StubAgent()), settings)
     queue = _FakeQueue()
 
-    await executor.execute(_stub_context(current_task=None), queue)
+    await executor.execute(_stub_context(current_task=None), queue.as_event_queue())
 
     assert isinstance(queue.events[0], a2a_pb2.Task)
     assert queue.events[0].status.state == a2a_pb2.TASK_STATE_SUBMITTED
@@ -551,7 +556,7 @@ async def test_executor_does_not_republish_task_on_resume(settings):
     queue = _FakeQueue()
 
     await executor.execute(
-        _stub_context(current_task=SimpleNamespace(id="t-1")), queue
+        _stub_context(current_task=SimpleNamespace(id="t-1")), queue.as_event_queue()
     )
 
     assert not any(isinstance(event, a2a_pb2.Task) for event in queue.events)
